@@ -27,31 +27,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.preprocessing import preprocess_pipeline
+from utils.metrics import compute_all_metrics
 
 # ============================================================
 # 工具函数
 # ============================================================
-
-
-def mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """自定义 MAPE，避免 sklearn 弃用警告和除零问题。"""
-    mask = np.abs(y_true) > 1e-8
-    if mask.sum() == 0:
-        return float("nan")
-    return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
-
-
-def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, prefix: str = "") -> dict:
-    """计算回归指标，返回结构化字典。"""
-    rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-    mae = float(np.mean(np.abs(y_true - y_pred)))
-    mape_val = mape(y_true, y_pred)
-    return {
-        f"{prefix}RMSE": round(rmse, 4),
-        f"{prefix}MAE": round(mae, 4),
-        f"{prefix}MAPE": round(mape_val, 4) if not np.isnan(mape_val) else None,
-        f"{prefix}N": len(y_true),
-    }
 
 
 def setup_logging(log_dir: Path) -> tuple:
@@ -243,13 +223,13 @@ def run_lgb_baseline(
 
     # 验证集预测
     val_preds = gbm.predict(val_df[feature_cols])
-    val_metrics = compute_metrics(
+    val_metrics = compute_all_metrics(
         val_df[target_col].values, val_preds, prefix="val_"
     )
 
     # 测试集预测
     test_preds = gbm.predict(test_df[feature_cols])
-    test_metrics = compute_metrics(
+    test_metrics = compute_all_metrics(
         test_df[target_col].values, test_preds, prefix="test_"
     )
 
