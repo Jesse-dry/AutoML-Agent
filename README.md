@@ -80,16 +80,36 @@ python models/LSTM/LSTM_baseline.py --task 15 --max-epochs 200 --patience 20
 - `lstm_baseline_task15_metrics.json` — 结构化指标（与 LGB 同格式）
 - `lstm_baseline_task15_predictions.csv` — 测试集预测结果
 
+### 4. PatchTST 基线
+
+```bash
+python models/PatchTST/patch_tst_baseline.py --task 15 --max-epochs 200 --patience 20
+```
+
+核心流程：`StandardScaler → 滑动窗口 → Patching → Channel-Independent Transformer → RevIN 逆归一化 → 指标`
+
+关键参数：
+- `--seq-len` 历史窗口（默认 48 小时）
+- `--patch-len` / `--stride` 控制 patch 切分（默认自动选择）
+- `--d-model` / `--n-heads` / `--n-layers` 控制 Transformer 规模
+- `--no-revin` 禁用 RevIN
+
+产出：
+- `patchtst_baseline_task15_best.pt` — 最佳 checkpoint
+- `patchtst_baseline_task15_metrics.json` — 结构化指标（与 LGB/LSTM 同格式）
+- `patchtst_baseline_task15_predictions.csv` — 测试集预测结果
+
 ---
 
 ## 基线结果 (Task 15)
 
 | 模型 | Val RMSE | Val MAPE | Test RMSE | Test MAPE | 参数量 |
 |------|----------|----------|-----------|-----------|--------|
-| LightGBM | 8.53 | 4.97% | **9.23** | **5.78%** | — |
-| LSTM | **6.20** | **4.04%** | 11.70 | 6.94% | 54,849 |
+| LightGBM | 8.53 | 4.97% | 9.23 | 5.78% | — |
+| LSTM | 6.20 | 4.04% | 11.70 | 6.94% | 54,849 |
+| **PatchTST** | **4.41** | **2.57%** | **8.14** | **4.80%** | 136,741 |
 
-> LSTM 验证集更好但测试集更差 → 小样本过拟合（训练集仅 386 行）。树模型在小数据上泛化更稳。
+> **PatchTST 全面最优**：通过 patching 机制将时序切分为 subseries-level tokens，配合通道独立 Transformer + RevIN 归一化，在小样本场景下仍能学到有效的时序表示。Val RMSE 比 LSTM 低 29%，Test RMSE 比 LightGBM 低 12%。
 
 ---
 

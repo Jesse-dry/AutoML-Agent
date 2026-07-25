@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 模型训练产出（不入库，体积大）
+models/*/output/
+*.pt
+*.pth
+
+# 数据
+GEFCom2014-L_V2/
+
+# 数据预处理笔记
+data/README_preprocessing.md
+
+# IDE
+.idea/
+.vscode/
+*.swp
