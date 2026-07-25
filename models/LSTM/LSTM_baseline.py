@@ -372,6 +372,14 @@ def run_lstm_baseline(
     # ---- Step 5: 评估（inverse_transform 后算指标） ----
     logger.info("Step 5/6: 评估 (inverse_transform → 真实量纲 → 指标)...")
 
+    # 训练集
+    _, train_preds_scaled, train_targets_scaled = evaluate(
+        model, train_loader, criterion, device
+    )
+    train_preds = target_scaler.inverse_transform(train_preds_scaled).flatten()
+    train_targets = target_scaler.inverse_transform(train_targets_scaled).flatten()
+    train_metrics = compute_all_metrics(train_targets, train_preds, prefix="train_")
+
     # 验证集
     _, val_preds_scaled, val_targets_scaled = evaluate(
         model, val_loader, criterion, device
@@ -390,6 +398,7 @@ def run_lstm_baseline(
 
     # 汇总
     all_metrics = {
+        **train_metrics,
         **val_metrics,
         **test_metrics,
         "best_epoch": best_epoch,
@@ -403,6 +412,9 @@ def run_lstm_baseline(
         "test_time_range": f"{test_df.index.min()} ~ {test_df.index.max()}",
     }
 
+    logger.info(f"  训练集 → RMSE={train_metrics['train_RMSE']:.4f}, "
+                f"MAE={train_metrics['train_MAE']:.4f}, "
+                f"MAPE={train_metrics['train_MAPE']:.2f}%")
     logger.info(f"  验证集 → RMSE={val_metrics['val_RMSE']:.4f}, "
                 f"MAE={val_metrics['val_MAE']:.4f}, "
                 f"MAPE={val_metrics['val_MAPE']:.2f}%")

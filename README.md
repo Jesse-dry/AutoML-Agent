@@ -103,13 +103,15 @@ python models/PatchTST/patch_tst_baseline.py --task 15 --max-epochs 200 --patien
 
 ## 基线结果 (Task 15)
 
-| 模型 | Val RMSE | Val MAPE | Test RMSE | Test MAPE | 参数量 |
-|------|----------|----------|-----------|-----------|--------|
-| LightGBM | 8.53 | 4.97% | 9.23 | 5.78% | — |
-| LSTM | 6.20 | 4.04% | 11.70 | 6.94% | 54,849 |
-| **PatchTST** | **4.41** | **2.57%** | **8.14** | **4.80%** | 136,741 |
+| 模型 | Train RMSE | Train MAPE | Val RMSE | Val MAPE | Test RMSE | Test MAPE | 参数量 |
+|------|-----------|------------|----------|----------|-----------|-----------|--------|
+| LightGBM | 7.74 | 4.86% | 8.53 | 4.97% | 9.23 | 5.78% | — |
+| LSTM | 6.07 | 3.97% | 6.20 | 4.04% | 11.70 | 6.94% | 54,849 |
+| **PatchTST** | **2.63** | **1.57%** | **3.22** | **1.95%** | **2.84** | **1.63%** | 139,301 |
 
-> **PatchTST 全面最优**：通过 patching 机制将时序切分为 subseries-level tokens，配合通道独立 Transformer + RevIN 归一化，在小样本场景下仍能学到有效的时序表示。Val RMSE 比 LSTM 低 29%，Test RMSE 比 LightGBM 低 12%。
+> **PatchTST 全面最优**：通过 patching 将时序切分为 subseries-level tokens，配合通道独立 Transformer + RevIN 归一化，在全部三个集合上大幅领先。Test RMSE（2.84）仅为 LightGBM（9.23）的 31%，LSTM（11.70）的 24%。
+>
+> LSTM 过拟合明显（Train 6.07 → Test 11.70），LightGBM 泛化更稳（Train 7.74 → Test 9.23），PatchTST 泛化最佳（Train 2.63 → Test 2.84）。
 
 ---
 

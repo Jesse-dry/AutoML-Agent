@@ -218,8 +218,14 @@ def run_lgb_baseline(
     best_iteration = gbm.best_iteration
     logger.info(f"  训练完成, best_iteration={best_iteration}")
 
-    # ---- 5. 验证集 & 测试集评估（显式预测 + 结构化指标） ----
+    # ---- 5. 训练/验证/测试集评估（显式预测 + 结构化指标） ----
     logger.info("Step 4/5: 评估模型...")
+
+    # 训练集预测
+    train_preds = gbm.predict(train_df[feature_cols])
+    train_metrics = compute_all_metrics(
+        train_df[target_col].values, train_preds, prefix="train_"
+    )
 
     # 验证集预测
     val_preds = gbm.predict(val_df[feature_cols])
@@ -235,6 +241,7 @@ def run_lgb_baseline(
 
     # 汇总所有指标
     all_metrics = {
+        **train_metrics,
         **val_metrics,
         **test_metrics,
         "best_iteration": best_iteration,
@@ -246,6 +253,9 @@ def run_lgb_baseline(
         "test_time_range": f"{test_df.index.min()} ~ {test_df.index.max()}",
     }
 
+    logger.info(f"  训练集 → RMSE={train_metrics['train_RMSE']:.4f}, "
+                f"MAE={train_metrics['train_MAE']:.4f}, "
+                f"MAPE={train_metrics['train_MAPE']:.2f}%")
     logger.info(f"  验证集 → RMSE={val_metrics['val_RMSE']:.4f}, "
                 f"MAE={val_metrics['val_MAE']:.4f}, "
                 f"MAPE={val_metrics['val_MAPE']:.2f}%")
