@@ -543,12 +543,227 @@ def build_iteration_context(
 # ============================================================
 # 4. Prompt 模板 & 渲染
 # ============================================================
+#
+# 设计原则：
+#   - System Prompt: 固定的角色、约束、领域知识、特征类型定义、输出格式
+#     → LLM API 的 system role，只需设定一次
+#   - User Prompt:  每轮变化的数据上下文（统计、ACF、特征重要性、迭代历史）
+#     → LLM API 的 user role，每轮迭代重新渲染
+#
+# 标准调用方式：
+#   from agent.feature_agent import build_messages
+#   messages = build_messages(ctx)  # → [{"role":"system",...}, {"role":"user",...}]
+#   response = llm_api.chat(messages)
 
-_PROMPT_TEMPLATE = """你是一位电力负荷预测领域的特征工程专家。
+# ============================================================
+# 4a. System Prompt（角色 · 约束 · 领域知识 · 特征类型 · 输出格式）
+# ============================================================
 
-## 任务
+_SYSTEM_PROMPT_TEMPLATE = """你是电力负荷时序预测领域的资深特征工程专家，擅长根据数据统计特性设计高价值的预测特征。
+
+## 角色定位
+
+你精通以下领域：
+- **电力系统负荷特性**：日内峰谷波动、工作日/周末负荷差异、季节性变化规律、
+  节假日效应、温度敏感性
+- **时序特征工程**：滞后特征 (lag)、滚动窗口统计 (rolling)、周期性编码 (sin/cos)、
+  交叉特征 (cross)、傅里叶变换、差分特征
+- **气象-负荷耦合**：温度滞后效应（温度变化→负荷响应有 1~6 小时延迟）、
+  湿度与体感温度的联合影响、多气象站空间信息融合
+- **特征选择策略**：基于 ACF 自相关分析的滞后选择、基于特征重要性的交叉组合、
+  基于残差分析的补充特征设计
+
+## 核心约束
+
+1. **时序因果性（最高优先级）**：严格遵循时序预测规范，所有特征只能基于
+   **历史信息**构造，绝对禁止使用任何形式的未来数据（包括但不限于：
+   未来时刻的真实值、基于全集的归一化统计量、look-ahead 滚动窗口）
+2. **输出纯净性**：回复必须是合法 JSON 对象，不包含任何前缀/后缀文字、
+   markdown 代码块标记、注释或额外解释
+3. **命名规范**：特征名 (name) 只能包含英文字母 a-z/A-Z、数字 0-9、下划线 _，
+   且以字母或下划线开头，长度 1~120 字符
+4. **列名有效性**：引用的 target_col、time_col、col1、col2 必须是
+   数据集中真实存在的列名
+5. **生成数量**：每次生成 3~5 个新特征，优先补充当前缺失的周期性、
+   滞后、统计类特征。若指标已收敛（delta < 0.001 连续 3 轮），
+   可输出空 new_features 列表表示停止
+
+## 电力负荷领域知识
+
+### 周期性规律
+- **日周期 (24h)**：ACF 在 lag=24 处通常显著 (>0.5)。优先设计:
+  lag_24、lag_48、lag_72；rolling_mean/std_24；hour 的 sin/cos 编码
+- **周周期 (168h)**：ACF 在 lag=168 处若显著 (>0.3)。优先设计:
+  lag_168、rolling_mean_168；dayofweek 的 sin/cos 编码
+- **半日周期 (12h)**：部分负荷在 lag=12 处也有峰值，考虑 lag_12、rolling_12
+
+### 工作日/周末模式
+- 工作日负荷曲线与周末显著不同 → is_weekend 与 LOAD 做 cross，
+  或按 weekday 分组做 rolling（需 group_col 参数）
+- 周一早晨和周五下午常有特殊峰谷 → dayofweek 的 one-hot 或 sin/cos 编码
+
+### 温度-负荷耦合
+- **温度即时效应**：temp 本身是强特征，通常 Top-5 重要性
+- **温度滞后效应**：温度变化对负荷的影响有 1~6 小时滞后，
+  考虑 temp_lag_1、temp_lag_3、temp_lag_6
+- **累积温度效应**：rolling_mean_24_temp 捕获「过去一天平均温度」
+  对体感舒适度的影响
+- **体感用电强度**：temp × LOAD（高温+高负荷=制冷需求）、
+  LOAD / temp（单位温度用电量）
+- **温度变化率**：temp 与 temp_lag_1 的差值（temp_diff_1 = cross subtract），
+  捕获温度骤变时的负荷冲击
+
+### 多气象站信息
+- 多个气象站 (w1~w25) 提供空间信息 → temp_mean、temp_std、temp_max、temp_min
+  等聚合统计量可提升鲁棒性
+- 站点间温度差异 (temp_max - temp_min) 反映区域温度不均匀性
+
+## 可用特征类型
+
+以下 4 种类型对应 feature_engine.py 中的确定性函数。
+请严格按照参数格式输出。
+
+### 1. lag — 滞后特征
+对目标列或特征列做时间偏移，捕获「历史值对未来的影响」。
+```json
+{{
+  "name": "lag_24_LOAD",
+  "type": "lag",
+  "target_col": "{target_col}",
+  "params": {{ "lag": 24 }}
+}}
+```
+- target_col: 要做滞后的列名（通常是 LOAD 或 temp）
+- params.lag: 滞后步数 (int, >=1)
+- 命名建议: lag_{{步数}}_{{列名}}，如 lag_72_LOAD、lag_3_temp
+
+### 2. rolling — 滚动窗口统计
+对目标列做滑动窗口聚合，捕获局部趋势和波动特征。
+```json
+{{
+  "name": "rolling_mean_24_LOAD",
+  "type": "rolling",
+  "target_col": "{target_col}",
+  "params": {{ "window": 24, "stat": "mean" }}
+}}
+```
+- target_col: 要做滚动统计的列名
+- params.window: 窗口大小 (int, >=2)。建议: 6/12/24/48/168
+- params.stat: 统计量 (str)。取值: mean, std, max, min, median, sum, skew, kurt
+- 命名建议: rolling_{{stat}}_{{window}}_{{列名}}
+
+### 3. time — 时间特征
+从时间列提取日期/时间分量，自动生成 sin/cos 周期性编码。
+```json
+{{
+  "name": "time_features_v1",
+  "type": "time",
+  "time_col": "{time_col}",
+  "params": {{ "features": ["hour", "dayofweek", "is_weekend"], "cyclical": true }}
+}}
+```
+- time_col: 时间列名（通常是 datetime）
+- params.features (可选): 要提取的特征列表。取值: year, month, day, dayofweek,
+  dayofyear, hour, minute, quarter, weekofyear, is_weekend, is_month_start, is_month_end。
+  不指定则全部生成
+- params.cyclical (可选): 是否生成 sin/cos 周期性编码 (bool, 默认 true)
+- 注意：若已有类似时间特征，只需提取缺失的分量
+
+### 4. cross — 交叉特征
+对两列做算术运算，捕获变量间的非线性关系。
+```json
+{{
+  "name": "temp_mul_LOAD",
+  "type": "cross",
+  "params": {{ "col1": "temp", "col2": "LOAD", "operation": "multiply" }}
+}}
+```
+- params.col1: 第一个操作列 (str)
+- params.col2: 第二个操作列 (str)
+- params.operation: 运算类型 (str)。取值: add (+), subtract (-),
+  multiply (×), divide (÷)
+- 命名建议: {{col1}}_{{op缩写}}_{{col2}}，如 temp_mul_LOAD、temp_div_LOAD
+
+## 特征设计策略
+
+按以下优先级思考：
+1. **补缺优先**：先看现有特征缺少什么类型——没有 lag 就补 lag，
+   没有 rolling 就补 rolling，没有周期性编码就补 time
+2. **ACF 驱动**：ACF 在某个滞后上很高 (>0.5) → 对该滞后生成 lag 和 rolling；
+   ACF 在某个滞后上为负 (<-0.3) → 考虑差分特征
+3. **重要性驱动**：Top-10 重要特征之间做 cross 组合；
+   Bottom-10 弱特征尝试不同窗口的 rolling 来增强信号
+4. **残差驱动**（迭代场景）：若上一轮 RMSE 改善很小，说明现有特征方向已饱和，
+   尝试完全不同的特征类型（如从 lag 切换到 rolling 或 cross）
+5. **避免冗余**：不生成与已有特征高度重复的特征（如已有 lag_24，
+   没必要再提 lag_23 或 lag_25；已有 rolling_mean_24，没必要再提 rolling_median_24）
+
+## 严格输出格式
+
+只输出一个 JSON 对象。格式：
+
+```json
+{{
+  "iteration": {iteration_example},
+  "analysis": "用中文简要分析当前数据特征和你的决策依据（100-200字）",
+  "new_features": [
+    {{
+      "name": "feature_name_here",
+      "type": "lag",
+      "target_col": "{target_col}",
+      "params": {{ "lag": 24 }}
+    }}
+  ]
+}}
+```
+
+如果认为不需要再添加特征（指标已收敛），输出空的 new_features 数组：
+```json
+{{
+  "iteration": {iteration_example},
+  "analysis": "当前指标已收敛，无需新增特征。",
+  "new_features": []
+}}
+```
+"""
+
+
+def build_system_prompt(
+    target_col: str = "LOAD",
+    time_col: str = "datetime",
+) -> str:
+    """
+    构建 System Prompt（角色 + 约束 + 领域知识 + 特征类型 + 输出格式）。
+
+    这是 LLM API 的 system role 内容，只需在会话开始时设定一次，
+    后续每轮迭代只需更新 user prompt 中的数据上下文。
+
+    Parameters
+    ----------
+    target_col : str
+        目标列名（用于特征类型示例中的占位符）
+    time_col : str
+        时间列名
+
+    Returns
+    -------
+    str
+        完整的 system prompt
+    """
+    return _SYSTEM_PROMPT_TEMPLATE.format(
+        target_col=target_col,
+        time_col=time_col,
+        iteration_example=1,
+    )
+
+
+# ============================================================
+# 4b. User Prompt（数据上下文 — 每轮迭代变化）
+# ============================================================
+
+_USER_PROMPT_TEMPLATE = """## 任务
 分析当前数据集和模型状态，提出 {max_new_features_min}~{max_new_features_max} 个新特征。
-你的目标是**提升模型在验证集上的 RMSE 和 MAE**。
+目标是**提升模型在验证集上的 RMSE 和 MAE**。
 
 ---
 
@@ -579,10 +794,7 @@ _PROMPT_TEMPLATE = """你是一位电力负荷预测领域的特征工程专家�
 - 趋势判断: **{trend_strength}**
 - 季节性强度: **{seasonality_strength}**
 
-## 现有特征
-总特征数: {n_features}
-
-{feature_list_block}
+{existing_features_block}
 
 {feature_importance_block}
 
@@ -590,114 +802,13 @@ _PROMPT_TEMPLATE = """你是一位电力负荷预测领域的特征工程专家�
 {current_metrics_block}
 
 {iteration_history_block}
-
-## 可用的特征类型
-
-你可以提议以下 4 种类型的特征，每种类型有严格的参数格式：
-
-### 1. lag —— 滞后特征
-对某列做时间偏移，捕获「历史值对未来的影响」。
-JSON 格式:
-```json
-{{
-  "name": "lag_24_LOAD",
-  "type": "lag",
-  "target_col": "{target_col}",
-  "params": {{ "lag": 24 }}
-}}
-```
-params: lag (int, >=1, 滞后步数)
-
-### 2. rolling —— 滚动窗口统计
-对某列做滑动窗口聚合，捕获局部趋势。
-JSON 格式:
-```json
-{{
-  "name": "rolling_mean_6_LOAD",
-  "type": "rolling",
-  "target_col": "{target_col}",
-  "params": {{ "window": 6, "stat": "mean" }}
-}}
-```
-params: window (int, >=2, 窗口大小), stat (str, 取值: mean, std, max, min, median, sum, skew, kurt)
-
-### 3. time —— 时间特征
-从时间列提取日期/时间分量。
-JSON 格式:
-```json
-{{
-  "name": "time_hour_sin",
-  "type": "time",
-  "time_col": "{time_col}",
-  "params": {{ "features": ["hour", "dayofweek"], "cyclical": true }}
-}}
-```
-params: features (可选, list[str], 取值: year, month, day, dayofweek, dayofyear, hour, minute, quarter, weekofyear, is_weekend, is_month_start, is_month_end), cyclical (可选, bool, 是否生成 sin/cos 周期性编码)
-
-### 4. cross —— 交叉特征
-对两列做算术运算。
-JSON 格式:
-```json
-{{
-  "name": "temp_mul_LOAD",
-  "type": "cross",
-  "params": {{ "col1": "temp", "col2": "LOAD", "operation": "multiply" }}
-}}
-```
-params: col1 (str, 第一个操作列), col2 (str, 第二个操作列), operation (str, 取值: add, subtract, multiply, divide)
-
----
-
-## 思考要求
-
-1. **结合 ACF 分析**: 如果某个滞后的 ACF 很高（>0.5），考虑对该滞后生成 lag 和 rolling 特征
-2. **结合特征重要性**: Top-10 中的重要特征值得组合出 cross；Bottom-10 中的弱特征可以尝试不同窗口的 rolling 来增强
-3. **结合指标**: 如果当前 MAE 仍然较大，考虑加入更多历史平滑特征 (rolling_mean)
-4. **避免冗余**: 不要生成与已有特征高度重复的新特征（如已有 lag_24，没必要再提 lag_24 或 lag_23）
-5. **命名规范**: name 字段用简洁英文加描述性后缀，如 lag_72_load、rolling_std_6_temp、cross_temp_load
-6. **确保列存在**: col1/col2/target_col/time_col 必须是数据集中已有的列名
-
----
-
-## 严格输出格式
-
-你必须**只输出**一个 JSON 对象，不要有任何其他文字。JSON 格式如下：
-
-```json
-{{
-  "iteration": {iteration_num},
-  "analysis": "用中文简要分析当前数据特征和你的决策依据（100-200字）",
-  "new_features": [
-    {{
-      "name": "feature_name_here",
-      "type": "lag",
-      "target_col": "{target_col}",
-      "params": {{ "lag": 24 }}
-    }}
-  ]
-}}
-```
-
-**重要**: 你的回复必须是一个可被 json.loads() 直接解析的合法 JSON。不要加 markdown 代码块标记。不要有任何前缀或后缀文字。
 """
 
 
-def build_llm_prompt(ctx: FeatureAgentContext) -> str:
-    """
-    将 FeatureAgentContext 渲染为 LLM prompt 字符串。
+def _render_user_prompt(ctx: FeatureAgentContext) -> str:
+    """渲染 User Prompt 的数据上下文部分。"""
 
-    Parameters
-    ----------
-    ctx : FeatureAgentContext
-
-    Returns
-    -------
-    str
-        完整的 prompt
-    """
-    # ---- 辅助格式化 ----
-
-    # ACF 表格
+    # ---- ACF 表格 ----
     if ctx.acf_summary:
         acf_rows = []
         for k, v in sorted(ctx.acf_summary.items()):
@@ -711,16 +822,20 @@ def build_llm_prompt(ctx: FeatureAgentContext) -> str:
     else:
         acf_table = "（无 ACF 数据）"
 
-    # 特征列表（简洁版：只列前 30 个）
+    # ---- 现有特征 ----
     if len(ctx.current_features) <= 30:
-        feature_list_block = "```\n" + ", ".join(ctx.current_features) + "\n```"
+        feat_list = ", ".join(ctx.current_features)
     else:
-        feature_list_block = (
-            f"```\n{', '.join(ctx.current_features[:30])}\n"
-            f"... (还有 {len(ctx.current_features) - 30} 个)\n```"
+        feat_list = (
+            f"{', '.join(ctx.current_features[:30])}\n"
+            f"... (还有 {len(ctx.current_features) - 30} 个)"
         )
+    existing_features_block = (
+        f"## 现有特征（共 {ctx.n_features} 个）\n"
+        f"```\n{feat_list}\n```"
+    )
 
-    # 特征重要性
+    # ---- 特征重要性 ----
     if ctx.top10_features:
         top10_lines = []
         for f in ctx.top10_features:
@@ -733,25 +848,25 @@ def build_llm_prompt(ctx: FeatureAgentContext) -> str:
                 f"  {f['feature']:<30s} gain={f['gain']:>12.1f} ({f['norm_pct']:>6.2f}%)"
             )
         feature_importance_block = (
-            "### Top-10 特征重要性\n```\n"
+            "## Top-10 特征重要性\n```\n"
             + "\n".join(top10_lines)
             + "\n```\n\n"
-            "### Bottom-10 特征重要性\n```\n"
+            "## Bottom-10 特征重要性\n```\n"
             + "\n".join(bottom10_lines)
             + "\n```"
         )
     else:
-        feature_importance_block = "（无特征重要性数据）"
+        feature_importance_block = ""
 
-    # 当前指标
+    # ---- 当前指标 ----
     metrics_block_parts = []
     if ctx.current_val_metrics:
-        metrics_block_parts.append("#### 验证集\n```")
+        metrics_block_parts.append("### 验证集\n```")
         for k, v in ctx.current_val_metrics.items():
             metrics_block_parts.append(f"  {k}: {v}")
         metrics_block_parts.append("```")
     if ctx.current_test_metrics:
-        metrics_block_parts.append("#### 测试集\n```")
+        metrics_block_parts.append("### 测试集\n```")
         for k, v in ctx.current_test_metrics.items():
             metrics_block_parts.append(f"  {k}: {v}")
         metrics_block_parts.append("```")
@@ -759,7 +874,7 @@ def build_llm_prompt(ctx: FeatureAgentContext) -> str:
         "\n".join(metrics_block_parts) if metrics_block_parts else "（无指标数据）"
     )
 
-    # 迭代历史
+    # ---- 迭代历史 ----
     iteration_history_block = ""
     if ctx.iteration > 0:
         iteration_history_block = f"""## 迭代历史
@@ -802,7 +917,7 @@ def build_llm_prompt(ctx: FeatureAgentContext) -> str:
                 "如果本轮没有新的特征思路，可以输出空 new_features 列表。\n\n"
             )
 
-    prompt = _PROMPT_TEMPLATE.format(
+    return _USER_PROMPT_TEMPLATE.format(
         dataset_name=ctx.dataset_name or "电力负荷数据集",
         n_samples=ctx.n_samples,
         sampling_frequency=ctx.sampling_frequency,
@@ -825,18 +940,87 @@ def build_llm_prompt(ctx: FeatureAgentContext) -> str:
         has_weekly="✅ 显著" if ctx.has_weekly_seasonality else "❌ 不显著",
         trend_strength=ctx.trend_strength,
         seasonality_strength=ctx.seasonality_strength,
-        n_features=ctx.n_features,
-        feature_list_block=feature_list_block,
+        existing_features_block=existing_features_block,
         feature_importance_block=feature_importance_block,
         current_metrics_block=current_metrics_block,
         iteration_history_block=iteration_history_block,
-        iteration_num=ctx.iteration,
         max_new_features_min=2,
         max_new_features_max=5,
-        time_col=ctx.time_col,
     )
 
-    return prompt
+
+# ============================================================
+# 4c. 公共 API
+# ============================================================
+
+def build_user_prompt(ctx: FeatureAgentContext) -> str:
+    """
+    构建 User Prompt（仅包含数据上下文，不含角色/约束/输出格式）。
+
+    与 build_system_prompt() 配合使用，构成完整的 LLM 消息对。
+
+    Parameters
+    ----------
+    ctx : FeatureAgentContext
+
+    Returns
+    -------
+    str
+    """
+    return _render_user_prompt(ctx)
+
+
+def build_llm_prompt(ctx: FeatureAgentContext) -> str:
+    """
+    [兼容模式] 构建单段 Prompt（system + user 合并）。
+
+    适用于不支持 system/user 分离的 LLM API 或需要单段 prompt 的场景。
+    新代码建议使用 build_messages() 获取标准 system/user 分离格式。
+
+    Parameters
+    ----------
+    ctx : FeatureAgentContext
+
+    Returns
+    -------
+    str
+        合并后的完整 prompt
+    """
+    system = build_system_prompt(ctx.target_col, ctx.time_col)
+    user = _render_user_prompt(ctx)
+    return system + "\n\n" + user
+
+
+def build_messages(
+    ctx: FeatureAgentContext,
+) -> List[Dict[str, str]]:
+    """
+    构建标准 LLM API messages 格式。
+
+    返回 system + user 两条消息，可直接传给 OpenAI / Anthropic / 等 API。
+
+    Parameters
+    ----------
+    ctx : FeatureAgentContext
+
+    Returns
+    -------
+    list[dict]
+        [
+            {{"role": "system", "content": "<system prompt>"}},
+            {{"role": "user",   "content": "<user prompt>"}},
+        ]
+    """
+    return [
+        {
+            "role": "system",
+            "content": build_system_prompt(ctx.target_col, ctx.time_col),
+        },
+        {
+            "role": "user",
+            "content": _render_user_prompt(ctx),
+        },
+    ]
 
 
 def _acf_bar(value: float, max_width: int = 20) -> str:
@@ -1558,12 +1742,70 @@ if __name__ == "__main__":
 
     print()
     print("=" * 60)
-    print("4. Prompt 渲染测试")
+    print("4a. System Prompt 测试")
+    print("=" * 60)
+    sys_prompt = build_system_prompt(target_col="LOAD", time_col="datetime")
+    print(f"  System Prompt 长度: {len(sys_prompt)} 字符")
+    # 验证关键模块存在
+    checks = [
+        ("角色定位", "角色"),
+        ("核心约束", "时序因果性"),
+        ("电力负荷领域知识", "日周期"),
+        ("可用特征类型", "lag"),
+        ("严格输出格式", "iteration"),
+    ]
+    for name, keyword in checks:
+        assert keyword in sys_prompt, f"System Prompt 应包含「{name}」"
+        print(f"  [OK] 包含「{name}」模块")
+    # 验证 target_col 占位符被正确替换
+    assert '"target_col": "LOAD"' in sys_prompt
+    assert '"time_col": "datetime"' in sys_prompt
+    print(f"  [OK] target_col/time_col 占位符已替换")
+
+    print()
+    print("=" * 60)
+    print("4b. User Prompt 测试")
+    print("=" * 60)
+    user_prompt = build_user_prompt(ctx)
+    print(f"  User Prompt 长度: {len(user_prompt)} 字符")
+    # 验证数据上下文模块存在
+    for name, keyword in [("数据集信息", "GEFCom2014"), ("目标列统计", "变异系数"),
+                           ("时序分析", "ACF"), ("现有特征", "lag_1"),
+                           ("Top-10", "1500000"), ("模型指标", "RMSE")]:
+        assert keyword in user_prompt, f"User Prompt 应包含「{name}」(关键字: {keyword})"
+        print(f"  [OK] 包含「{name}」")
+    # 验证 user prompt 不包含系统 prompt 的角色/约束内容
+    assert "角色定位" not in user_prompt, "User Prompt 不应包含角色定义"
+    assert "核心约束" not in user_prompt, "User Prompt 不应包含约束"
+    assert "电力负荷领域知识" not in user_prompt, "User Prompt 不应包含领域知识"
+    print(f"  [OK] User Prompt 不包含角色/约束/领域知识（职责分离正确）")
+
+    print()
+    print("=" * 60)
+    print("4c. build_messages() — 标准 LLM API 格式测试")
+    print("=" * 60)
+    messages = build_messages(ctx)
+    assert len(messages) == 2, f"应有 2 条消息，实际: {len(messages)}"
+    assert messages[0]["role"] == "system", f"第一条应为 system，实际: {messages[0]['role']}"
+    assert messages[1]["role"] == "user", f"第二条应为 user，实际: {messages[1]['role']}"
+    assert len(messages[0]["content"]) > 1000, "System prompt 应足够详细"
+    assert len(messages[1]["content"]) > 500, "User prompt 应有数据上下文"
+    print(f"  [OK] 返回 2 条消息: system({len(messages[0]['content'])}chars) + user({len(messages[1]['content'])}chars)")
+    # 验证可被标准 LLM API 消费
+    import json as _json
+    _json.dumps(messages, ensure_ascii=False)  # 不应抛异常
+    print(f"  [OK] json.dumps 可序列化（可直接用于 HTTP API 请求）")
+
+    print()
+    print("=" * 60)
+    print("4d. build_llm_prompt() — 兼容模式测试")
     print("=" * 60)
     prompt = build_llm_prompt(ctx)
-    print(f"  Prompt 长度: {len(prompt)} 字符")
-    print(f"  前 500 字符:\n{prompt[:500]}")
-    print("  ...")
+    print(f"  合并 Prompt 长度: {len(prompt)} 字符")
+    # 合并 prompt 应同时包含 system 和 user 的内容
+    assert "角色定位" in prompt, "合并 prompt 应包含角色定义"
+    assert "GEFCom2014" in prompt, "合并 prompt 应包含数据集信息"
+    print(f"  [OK] 合并 prompt 包含 system + user 内容")
 
     print()
     print("=" * 60)
@@ -1752,12 +1994,34 @@ if __name__ == "__main__":
     print(f"  metrics_delta: {ctx_iter2.metrics_delta}")
     print(f"  previous_features_added: {ctx_iter2.previous_features_added}")
 
+    # 用新 API（build_messages）测试迭代 prompt
+    iter_messages = build_messages(ctx_iter2)
+    assert len(iter_messages) == 2
+    iter_user = iter_messages[1]["content"]
+    print(f"  迭代 user prompt 长度: {len(iter_user)} 字符")
+    assert "迭代历史" in iter_user, "迭代 user prompt 应包含迭代历史"
+    assert "Δ" in iter_user, "迭代 user prompt 应包含 delta"
+    assert "lag_72_load" in iter_user, "迭代 user prompt 应列出上轮新增特征"
+    print("  [OK] build_messages 迭代 prompt 包含历史信息")
+
+    # 兼容模式也验证
     prompt2 = build_llm_prompt(ctx_iter2)
-    print(f"  迭代 prompt 长度: {len(prompt2)} 字符")
-    # 验证迭代历史块出现在 prompt 中
-    assert "迭代历史" in prompt2, "迭代 prompt 应包含迭代历史"
-    assert "Δ" in prompt2, "迭代 prompt 应包含 delta"
-    print("  [OK] 迭代 prompt 包含历史信息")
+    assert "迭代历史" in prompt2
+    print("  [OK] build_llm_prompt 兼容模式也包含迭代历史")
+
+    print()
+    print("=" * 60)
+    print("10. System Prompt 独立使用测试")
+    print("=" * 60)
+    # 验证 system prompt 可在多轮迭代中复用（不随 ctx 变化）
+    sys1 = build_system_prompt("LOAD", "datetime")
+    sys2 = build_system_prompt("LOAD", "datetime")
+    assert sys1 == sys2, "相同参数应返回相同 system prompt"
+    print(f"  [OK] System Prompt 幂等: 相同输入 → 相同输出")
+    # 不同 target_col 应产生不同 prompt
+    sys3 = build_system_prompt("PRICE", "date")
+    assert "PRICE" in sys3 and "date" in sys3
+    print(f"  [OK] System Prompt 支持不同 target_col/time_col")
 
     print()
     print("=" * 60)
