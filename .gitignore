@@ -22,3 +22,7 @@ data/README_preprocessing.md
 .idea/
 .vscode/
 *.swp
+
+# 环境变量 / API Key（绝对不能推送）
+.env
+.env.local

@@ -924,7 +924,8 @@ def _render_user_prompt(ctx: FeatureAgentContext) -> str:
         target_col=ctx.target_col,
         prediction_horizon=ctx.prediction_horizon,
         history_window_line=(
-            f"- 历史窗口: {ctx.history_window} 步"
+            f"- 历史窗口: {ctx.history_window} 步\n"
+            f"- [注意] 验证集较小，lag 和 rolling window 请勿过大"
             if ctx.history_window is not None
             else ""
         ),
@@ -1673,6 +1674,47 @@ _QWEN_MODELS = {
 }
 
 
+def _load_dotenv_key() -> str:
+    """
+    从项目根目录的 .env 文件中读取 DASHSCOPE_API_KEY。
+
+    仅在环境变量未设置时调用，用于本地开发场景。
+    不会覆盖已有的环境变量。
+    """
+    import os
+    from pathlib import Path
+
+    # 从当前文件向上找项目根目录（含 agent/ 目录的父目录）
+    try:
+        candidate = Path(__file__).resolve().parent.parent / ".env"
+    except (NameError, AttributeError):
+        candidate = Path(".env")
+
+    if not candidate.exists():
+        return ""
+
+    try:
+        with open(candidate, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key == "DASHSCOPE_API_KEY" and value:
+                    # 不覆盖已有的环境变量
+                    if key not in os.environ:
+                        os.environ[key] = value
+                    return value
+    except Exception:
+        pass
+
+    return ""
+
+
 class QwenClient:
     """
     通义千问 (DashScope) LLM 客户端。
@@ -1703,7 +1745,10 @@ class QwenClient:
         Parameters
         ----------
         api_key : str, optional
-            DashScope API Key。若为 None，从 DASHSCOPE_API_KEY 环境变量读取
+            DashScope API Key。若为 None，按以下优先级查找：
+            1. 函数参数 api_key
+            2. 环境变量 DASHSCOPE_API_KEY
+            3. 项目根目录 .env 文件中的 DASHSCOPE_API_KEY
         model : str, optional
             模型 ID，默认 qwen-max (Qwen3.7 Max)
         base_url : str, optional
@@ -1720,13 +1765,18 @@ class QwenClient:
         if dry_run:
             self.api_key = "dry-run"
         else:
+            # 优先级: 显式参数 → 环境变量 → .env 文件
             self.api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
             if not self.api_key:
+                self.api_key = _load_dotenv_key()
+            if not self.api_key:
                 raise ValueError(
-                    "未找到 DashScope API Key。请设置环境变量:\n"
-                    "  export DASHSCOPE_API_KEY='sk-...'\n"
-                    "或显式传入: QwenClient(api_key='sk-...')\n"
-                    "或使用测试模式: QwenClient(dry_run=True)\n\n"
+                    "未找到 DashScope API Key。请通过以下任一方式提供:\n"
+                    "  1. 显式传入: QwenClient(api_key='sk-...')\n"
+                    "  2. 环境变量: export DASHSCOPE_API_KEY='sk-...'\n"
+                    "  3. .env 文件: 在项目根目录创建 .env 文件，"
+                    "写入 DASHSCOPE_API_KEY=sk-...\n"
+                    "  4. 测试模式: QwenClient(dry_run=True)\n\n"
                     "获取 API Key: https://dashscope.console.aliyun.com/apiKey"
                 )
 
@@ -1899,13 +1949,19 @@ def check_data_leakage(
                     f"以避免将当前 target 值泄露给模型。建议用 lag 替代或先 shift 再做 rolling。"
                 )
 
-        # ---- 检查 3: 交叉特征 ----
-        if col.startswith(target_col) or f"_{target_col}" in col:
-            # 交叉特征中包含了目标列
-            warnings_list.append(
-                f"[INFO] [{col}] 交叉特征包含目标列 '{target_col}'。"
-                f"请确保运算中使用的是历史值（如 target_lag 而非 target）。"
-            )
+        # ---- 检查 3: 交叉特征（排除 lag/rolling 以免误判）----
+        if ("_lag_" not in col and "_rolling_" not in col
+                and "_minus_" not in col and "_plus_" not in col
+                and "_div_" not in col and "_multiply_" not in col):
+            # 不是已知特征类型，跳过
+            pass
+        elif ("_minus_" in col or "_plus_" in col
+              or "_div_" in col or "_multiply_" in col):
+            if col.startswith(target_col) or f"_{target_col}" in col:
+                warnings_list.append(
+                    f"[INFO] [{col}] 交叉特征包含目标列 '{target_col}'。"
+                    f"请确保运算中使用的是历史值（如 target_lag 而非 target）。"
+                )
 
     # 判断是否有 hard failure（[LEAK]）
     hard_failures = [w for w in warnings_list if w.startswith("[LEAK]")]
@@ -2226,8 +2282,13 @@ class FeatureIterationRunner:
                     print("  [STOP] 检测到严重数据泄露，丢弃本轮特征")
                 continue
 
-            # Step 5: 更新特征列表 + 重新训练
+            # Step 5: 先更新 DataFrames（让新特征列可用），再重新训练
+            self.train_df = df_new
+            self.val_df = val_new
+            self.test_df = test_new
             new_feature_cols = self.feature_cols + added_cols
+            self.feature_cols = new_feature_cols
+
             new_metrics = self._retrain_and_eval(new_feature_cols)
 
             if new_metrics.get("RMSE", float("inf")) >= float("inf"):
@@ -2246,11 +2307,7 @@ class FeatureIterationRunner:
                 analysis=llm_output.get("analysis", ""),
             )
 
-            # Step 7: 更新状态
-            self.train_df = df_new
-            self.val_df = val_new
-            self.test_df = test_new
-            self.feature_cols = new_feature_cols
+            # Step 7: 记录新增特征
             self.all_added_features.extend(added_cols)
 
             if verbose:
@@ -2331,6 +2388,17 @@ class FeatureIterationRunner:
           - 第 2~3 次: 在 prompt 后追加错误信息，要求 LLM 修正
         """
         messages = build_messages(ctx)
+
+        # 追加最大 lag 约束提示
+        max_safe_lag = self._compute_max_safe_lag()
+        if max_safe_lag < 168:
+            messages[-1]["content"] += (
+                f"\n\n【重要约束】当前验证集只有 {len(self.val_df)} 行数据。"
+                f"为避免生成过多 NaN 导致验证集不可用，"
+                f"本次 lag 值请勿超过 **{max_safe_lag}**，"
+                f"rolling 窗口请勿超过 **{max_safe_lag}**。"
+            )
+
         error_history = []
 
         for attempt in range(1, self.max_retries + 1):
@@ -2348,14 +2416,23 @@ class FeatureIterationRunner:
                         f"\n\n【重要】你的上一次输出有格式错误，请修正后重新输出:"
                         f"\n{err_text}"
                         f"\n\n请严格遵循 JSON 格式，不要包含任何额外文字。"
+                        f"\n\n特别注意：列名必须与上面「现有特征」列表中完全一致。"
                     )
                     messages[-1]["content"] += correction_msg
 
                 raw = self.llm_client.chat(messages, temperature=0.2)
 
                 # 校验
-                available_cols = list(self.train_df.columns) + self.feature_cols
+                available_cols = (
+                    list(self.train_df.columns)
+                    + self.feature_cols
+                    + [self.time_col, self.target_col]
+                )
+                available_cols = list(dict.fromkeys(available_cols))
                 validated = validate_llm_output(raw, available_columns=available_cols)
+
+                # 过滤过大的 lag/rolling（保护验证集不被 NaN 淹没）
+                validated = self._filter_oversized_features(validated, max_safe_lag)
                 return validated
 
             except ValueError as e:
@@ -2372,6 +2449,37 @@ class FeatureIterationRunner:
         if verbose:
             print(f"  [FAIL] {self.max_retries} 次重试后仍失败")
         return None
+
+    def _compute_max_safe_lag(self) -> int:
+        """计算不破坏验证集的最大安全滞后值。保留至少 40 行 val 数据。"""
+        min_val_rows = 40
+        val_len = len(self.val_df)
+        return max(1, val_len - min_val_rows)
+
+    def _filter_oversized_features(
+        self, validated: dict, max_safe_lag: int,
+    ) -> dict:
+        """过滤掉 lag/rolling 参数过大的特征。"""
+        filtered = []
+        removed = []
+        for f in validated["new_features"]:
+            if f["type"] == "lag":
+                if f["params"].get("lag", 0) > max_safe_lag:
+                    removed.append(f"{f['name']} (lag={f['params']['lag']} > {max_safe_lag})")
+                    continue
+            elif f["type"] == "rolling":
+                if f["params"].get("window", 0) > max_safe_lag:
+                    removed.append(f"{f['name']} (window={f['params']['window']} > {max_safe_lag})")
+                    continue
+            filtered.append(f)
+
+        if removed:
+            # 更新 analysis
+            validated["analysis"] += (
+                f" (过滤了 {len(removed)} 个参数过大的特征: {', '.join(removed)})"
+            )
+        validated["new_features"] = filtered
+        return validated
 
     def _retrain_and_eval(self, feature_cols: List[str]) -> Dict[str, float]:
         """调用重训练回调，返回指标字典。"""
