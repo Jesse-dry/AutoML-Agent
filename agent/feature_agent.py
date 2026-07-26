@@ -161,7 +161,7 @@ def compute_acf_summary(
     计算目标列在指定滞后步数上的自相关系数 (ACF)。
 
     用 pandas 自带的 .autocorr() 实现，零依赖。
-    ACF 值域 [-1, 1]，越接近 ±1 表示相关性越强。
+    ACF 值域 [-1, 1]，越接近 +/-1 表示相关性越强。
 
     Parameters
     ----------
@@ -902,18 +902,18 @@ def _render_user_prompt(ctx: FeatureAgentContext) -> str:
             )
             if rmse_key and ctx.metrics_delta[rmse_key] > 0.5:
                 iteration_history_block += (
-                    "⚠️ **上一轮特征添加后 RMSE 反而上升，"
+                    "[WARN] **上一轮特征添加后 RMSE 反而上升，"
                     "本轮请尝试不同类型的特征或更保守的窗口大小。**\n\n"
                 )
             elif rmse_key and ctx.metrics_delta[rmse_key] < -0.5:
                 iteration_history_block += (
-                    "✅ **上一轮特征添加后 RMSE 明显改善，"
+                    "[OK] **上一轮特征添加后 RMSE 明显改善，"
                     "本轮可以继续在相似方向深化（如扩大窗口范围）。**\n\n"
                 )
 
         if ctx.stop_reason:
             iteration_history_block += (
-                f"⚠️ 停止建议: {ctx.stop_reason}\n"
+                f"[WARN] 停止建议: {ctx.stop_reason}\n"
                 "如果本轮没有新的特征思路，可以输出空 new_features 列表。\n\n"
             )
 
@@ -936,8 +936,8 @@ def _render_user_prompt(ctx: FeatureAgentContext) -> str:
         target_q05=ctx.target_q05,
         target_q95=ctx.target_q95,
         acf_table=acf_table,
-        has_daily="✅ 显著" if ctx.has_daily_seasonality else "❌ 不显著",
-        has_weekly="✅ 显著" if ctx.has_weekly_seasonality else "❌ 不显著",
+        has_daily="[YES] 显著" if ctx.has_daily_seasonality else "[NO]  不显著",
+        has_weekly="[YES] 显著" if ctx.has_weekly_seasonality else "[NO]  不显著",
         trend_strength=ctx.trend_strength,
         seasonality_strength=ctx.seasonality_strength,
         existing_features_block=existing_features_block,
@@ -1658,6 +1658,946 @@ class FeatureIterationHistory:
 
 
 # ============================================================
+# 9. LLM 客户端 — 通义千问 (DashScope)
+# ============================================================
+
+# Qwen3.7 Max 模型 ID（DashScope OpenAI 兼容接口）
+_QWEN_DEFAULT_MODEL = "qwen-max"
+_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+# 可用模型列表及说明
+_QWEN_MODELS = {
+    "qwen-max": "Qwen3.7 Max (最强，推荐用于特征工程决策)",
+    "qwen-plus": "Qwen3.7 Plus (性价比)",
+    "qwen-turbo": "Qwen3.7 Turbo (速度优先)",
+}
+
+
+class QwenClient:
+    """
+    通义千问 (DashScope) LLM 客户端。
+
+    使用 OpenAI 兼容接口，支持任意 OpenAI SDK 风格的调用。
+    API Key 从环境变量 DASHSCOPE_API_KEY 读取。
+
+    用法：
+        client = QwenClient()                # 自动读 DASHSCOPE_API_KEY
+        client = QwenClient(api_key="...")   # 显式传入
+        client = QwenClient(dry_run=True)    # 测试模式（不真实调 API）
+
+        # 标准 messages 格式
+        response = client.chat([
+            {{"role": "system", "content": "..."}},
+            {{"role": "user",   "content": "..."}},
+        ])
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = None,
+        base_url: str = None,
+        dry_run: bool = False,
+    ):
+        """
+        Parameters
+        ----------
+        api_key : str, optional
+            DashScope API Key。若为 None，从 DASHSCOPE_API_KEY 环境变量读取
+        model : str, optional
+            模型 ID，默认 qwen-max (Qwen3.7 Max)
+        base_url : str, optional
+            API 地址
+        dry_run : bool
+            测试模式，不真实调用 API，返回模拟响应
+        """
+        import os
+
+        self.model = model or _QWEN_DEFAULT_MODEL
+        self.base_url = base_url or _QWEN_BASE_URL
+        self.dry_run = dry_run
+
+        if dry_run:
+            self.api_key = "dry-run"
+        else:
+            self.api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
+            if not self.api_key:
+                raise ValueError(
+                    "未找到 DashScope API Key。请设置环境变量:\n"
+                    "  export DASHSCOPE_API_KEY='sk-...'\n"
+                    "或显式传入: QwenClient(api_key='sk-...')\n"
+                    "或使用测试模式: QwenClient(dry_run=True)\n\n"
+                    "获取 API Key: https://dashscope.console.aliyun.com/apiKey"
+                )
+
+        self._last_response = None
+        self._retry_count = 0
+
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.3,
+        max_tokens: int = 2000,
+        extra_body: Optional[Dict] = None,
+    ) -> str:
+        """
+        发送 chat 请求，返回 LLM 响应文本。
+
+        Parameters
+        ----------
+        messages : list[dict]
+            [{"role": "...", "content": "..."}]
+        temperature : float
+            采样温度 (0~2)。特征工程建议 0.1~0.3，保证输出稳定
+        max_tokens : int
+            最大输出 token 数
+        extra_body : dict, optional
+            额外参数（如 enable_search）
+
+        Returns
+        -------
+        str
+            LLM 响应文本（应为纯 JSON）
+        """
+        if self.dry_run:
+            return self._dry_run_response(messages)
+
+        try:
+            import requests
+        except ImportError:
+            raise ImportError(
+                "需要安装 requests 库: pip install requests"
+            )
+
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if extra_body:
+            payload["extra_body"] = extra_body
+
+        try:
+            resp = requests.post(
+                url, headers=headers, json=payload, timeout=120,
+            )
+            resp.raise_for_status()
+        except requests.exceptions.Timeout:
+            raise RuntimeError("LLM API 请求超时 (120s)")
+        except requests.exceptions.HTTPError as e:
+            detail = resp.text[:500] if resp.text else "无详细信息"
+            raise RuntimeError(
+                f"LLM API 返回 HTTP 错误: {e}\n响应: {detail}"
+            )
+
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        self._last_response = content
+        return content
+
+    def _dry_run_response(self, messages: List[Dict]) -> str:
+        """测试模式：返回模拟特征决策 JSON。"""
+        user_content = ""
+        for m in messages:
+            if m["role"] == "user":
+                user_content = m["content"]
+                break
+
+        return """{
+  "iteration": 1,
+  "analysis": "[DRY RUN] 基于ACF分析，日周期性显著，建议补充lag_48、rolling_std_24等中等窗口特征来捕获更长程的时间依赖。",
+  "new_features": [
+    {"name": "lag_48_load", "type": "lag", "target_col": "LOAD", "params": {"lag": 48}},
+    {"name": "rolling_std_24_load", "type": "rolling", "target_col": "LOAD", "params": {"window": 24, "stat": "std"}},
+    {"name": "lag_3_temp", "type": "lag", "target_col": "temp", "params": {"lag": 3}}
+  ]
+}"""
+
+    @property
+    def last_response(self) -> Optional[str]:
+        return self._last_response
+
+
+# ============================================================
+# 10. 数据泄露检查
+# ============================================================
+
+def check_data_leakage(
+    df: pd.DataFrame,
+    new_feature_names: List[str],
+    target_col: str,
+    time_col: str = "datetime",
+    pred_horizon: int = 1,
+) -> Tuple[bool, List[str]]:
+    """
+    检查新生成的特征是否存在数据泄露（使用了未来信息）。
+
+    检查项：
+      1. 目标列的滞后特征 lag 值是否 >= pred_horizon（确保不用当前值预测当前值）
+      2. 目标列的滚动特征是否有可能泄露当前值
+      3. 交叉特征中是否包含目标列（若包含，需要额外警惕）
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        包含新旧特征的完整 DataFrame
+    new_feature_names : list[str]
+        本轮新增的列名
+    target_col : str
+        目标列名
+    time_col : str
+        时间列名
+    pred_horizon : int
+        预测步长。预测 t+pred_horizon 时，t 及之前的数据可用
+
+    Returns
+    -------
+    (is_safe, warnings_list)
+        is_safe: True 表示未发现泄露风险
+        warnings_list: 警告信息列表
+    """
+    warnings_list = []
+
+    for col in new_feature_names:
+        # ---- 检查 1: 滞后特征 ----
+        if "_lag_" in col:
+            # 提取 lag 值: "LOAD_lag_24" → 24
+            try:
+                lag_val = int(col.rsplit("_", 1)[-1])
+            except ValueError:
+                continue
+
+            # 判断该特征是基于哪个原始列的
+            base_col = _infer_base_column(col, df.columns)
+
+            # 硬故障：lag<=0 一定是未来数据泄露
+            if lag_val <= 0:
+                warnings_list.append(
+                    f"[LEAK] [{col}] 滞后值 {lag_val} <= 0，使用未来数据！"
+                )
+            elif base_col == target_col and lag_val < pred_horizon:
+                warnings_list.append(
+                    f"[WARN] [{col}] 目标列 '{target_col}' 的滞后 {lag_val} "
+                    f"< 预测步长 {pred_horizon}，可能使用当前或未来值做预测"
+                )
+
+        # ---- 检查 2: 滚动特征 ----
+        if "_rolling_" in col:
+            base_col = _infer_base_column(col, df.columns)
+
+            if base_col == target_col:
+                # 滚动统计包含窗口内所有值（含当前），需要 shift
+                # 但 feature_engine 已经默认 center=False（只看过去），所以只是提醒
+                warnings_list.append(
+                    f"[INFO] [{col}] 目标列的滚动特征。确保在训练时已做 shift(1) "
+                    f"以避免将当前 target 值泄露给模型。建议用 lag 替代或先 shift 再做 rolling。"
+                )
+
+        # ---- 检查 3: 交叉特征 ----
+        if col.startswith(target_col) or f"_{target_col}" in col:
+            # 交叉特征中包含了目标列
+            warnings_list.append(
+                f"[INFO] [{col}] 交叉特征包含目标列 '{target_col}'。"
+                f"请确保运算中使用的是历史值（如 target_lag 而非 target）。"
+            )
+
+    # 判断是否有 hard failure（[LEAK]）
+    hard_failures = [w for w in warnings_list if w.startswith("[LEAK]")]
+    is_safe = len(hard_failures) == 0
+
+    return is_safe, warnings_list
+
+
+def _infer_base_column(feature_name: str, available_columns: List[str]) -> str:
+    """
+    从特征名推断其基于的原始列。
+
+    例: "LOAD_lag_24" → "LOAD", "temp_rolling_6_mean" → "temp"
+    """
+    # 尝试匹配已知模式
+    patterns = ["_lag_", "_rolling_", "_minus_", "_plus_", "_div_", "_multiply_"]
+    for pat in patterns:
+        if pat in feature_name:
+            return feature_name.split(pat)[0]
+
+    # 尝试匹配列名子串
+    for col in sorted(available_columns, key=len, reverse=True):
+        if feature_name.startswith(col) or feature_name.endswith(col):
+            return col
+
+    return "未知"
+
+
+# ============================================================
+# 11. 特征工程迭代运行器（核心闭环）
+# ============================================================
+
+# 重训练回调函数签名
+RetrainCallback = callable  # (train_df, feature_cols, target_col) -> dict of metrics
+
+
+def _default_retrain(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    feature_cols: List[str],
+    target_col: str,
+) -> Dict[str, float]:
+    """
+    默认重训练函数：使用 LightGBM 快速训练 + 评估。
+
+    这是 FeatureIterationRunner 的默认 retrain_fn，
+    使用者可以替换为任意模型（LSTM、XGBoost 等）。
+    """
+    import lightgbm as lgb
+    from utils.metrics import compute_all_metrics
+
+    # 清理 NaN
+    train_clean = train_df.dropna(subset=feature_cols + [target_col])
+    val_clean = val_df.dropna(subset=feature_cols + [target_col])
+
+    if len(train_clean) < 50 or len(val_clean) < 10:
+        return {"RMSE": float("inf"), "MAE": float("inf"),
+                "error": "数据量不足", "n_train": len(train_clean)}
+
+    train_data = lgb.Dataset(
+        train_clean[feature_cols], label=train_clean[target_col],
+    )
+    val_data = lgb.Dataset(
+        val_clean[feature_cols], label=val_clean[target_col],
+        reference=train_data,
+    )
+
+    params = {
+        "objective": "regression",
+        "metric": "rmse",
+        "learning_rate": 0.05,
+        "num_leaves": 31,
+        "min_data_in_leaf": 20,
+        "feature_fraction": 0.8,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 1,
+        "verbose": -1,
+        "seed": 42,
+        "num_threads": -1,
+    }
+
+    gbm = lgb.train(
+        params, train_data,
+        num_boost_round=500,
+        valid_sets=[train_data, val_data],
+        valid_names=["train", "val"],
+        callbacks=[
+            lgb.early_stopping(stopping_rounds=50),
+            lgb.log_evaluation(period=0),
+        ],
+    )
+
+    val_preds = gbm.predict(val_clean[feature_cols])
+    metrics = compute_all_metrics(
+        val_clean[target_col].values, val_preds, prefix="val_"
+    )
+    # 简化命名
+    return {
+        "RMSE": metrics.get("val_RMSE", float("inf")),
+        "MAE": metrics.get("val_MAE", float("inf")),
+        "MAPE": metrics.get("val_MAPE", float("inf")),
+        "R2": metrics.get("val_R2", float("nan")),
+        "best_iteration": gbm.best_iteration,
+        "n_train": len(train_clean),
+        "n_val": len(val_clean),
+    }
+
+
+class FeatureIterationRunner:
+    """
+    特征工程迭代闭环运行器。
+
+    完整流程：
+      Round 0: baseline 特征 → 训练 → 得到 baseline 指标
+      Round 1~N:
+        1. 构建上下文 (含 ACF + 特征重要性 + 迭代历史)
+        2. 组装 System + User Prompt → 调用 LLM
+        3. 解析 LLM 返回 JSON（最多重试 3 次）
+        4. 校验格式 → 执行特征生成
+        5. 数据泄露检查
+        6. 重新训练模型 → 获得新指标
+        7. 记录迭代历史
+        8. 判断是否继续（指标改善 < 阈值 或 达到最大轮次）
+
+    用法：
+        runner = FeatureIterationRunner(
+            train_df, val_df, test_df,
+            feature_cols=baseline_features,
+            target_col="LOAD",
+            time_col="datetime",
+            llm_client=QwenClient(),
+            max_iterations=5,
+        )
+        result = runner.run()
+        print(result["summary"])
+    """
+
+    def __init__(
+        self,
+        train_df: pd.DataFrame,
+        val_df: pd.DataFrame,
+        test_df: pd.DataFrame,
+        feature_cols: List[str],
+        target_col: str,
+        time_col: str = "datetime",
+        llm_client: Optional[QwenClient] = None,
+        retrain_fn: Optional[RetrainCallback] = None,
+        max_iterations: int = 5,
+        max_retries: int = 3,
+        pred_horizon: int = 1,
+        dataset_name: str = "",
+        sampling_frequency: str = "",
+        improvement_threshold: float = 0.001,
+    ):
+        """
+        Parameters
+        ----------
+        train_df, val_df, test_df : pd.DataFrame
+            训练/验证/测试集（已包含 baseline 特征）
+        feature_cols : list[str]
+            初始特征列列表
+        target_col : str
+            目标列名
+        time_col : str
+            时间列名
+        llm_client : QwenClient, optional
+            LLM 客户端。若为 None，使用 dry_run 模式
+        retrain_fn : callable, optional
+            重训练回调。签名: (train_df, val_df, feature_cols, target_col) -> dict
+        max_iterations : int
+            最大特征迭代轮次
+        max_retries : int
+            LLM 输出格式错误时的最大重试次数
+        pred_horizon : int
+            预测步长（用于泄露检查）
+        dataset_name : str
+            数据集名称
+        sampling_frequency : str
+            采样频率
+        improvement_threshold : float
+            RMSE 改善阈值。连续两轮改善低于此值则提前停止
+        """
+        self.train_df = train_df.copy()
+        self.val_df = val_df.copy()
+        self.test_df = test_df.copy()
+        self.feature_cols = list(feature_cols)
+        self.target_col = target_col
+        self.time_col = time_col
+        self.pred_horizon = pred_horizon
+        self.dataset_name = dataset_name or "电力负荷数据集"
+        self.sampling_frequency = sampling_frequency
+        self.max_iterations = max_iterations
+        self.max_retries = max_retries
+        self.improvement_threshold = improvement_threshold
+
+        # LLM 客户端
+        if llm_client is None:
+            print("[INFO] 未提供 LLM 客户端，使用 dry_run 测试模式")
+            self.llm_client = QwenClient(dry_run=True)
+        else:
+            self.llm_client = llm_client
+
+        # 重训练函数
+        self.retrain_fn = retrain_fn or (
+            lambda t, v, f, c: _default_retrain(t, v, f, c)
+        )
+
+        # 状态
+        self.history = FeatureIterationHistory()
+        self.all_added_features: List[str] = []
+        self.best_val_metrics: Optional[Dict[str, float]] = None
+        self.best_features: Optional[List[str]] = None
+        self.best_iteration: int = 0
+        self.baseline_metrics: Optional[Dict[str, float]] = None
+
+    # --------------------------------------------------------
+    # 主流程
+    # --------------------------------------------------------
+
+    def run(self, verbose: bool = True) -> Dict[str, Any]:
+        """
+        运行完整的特征工程迭代闭环。
+
+        Returns
+        -------
+        dict: {
+            "baseline_metrics": dict,
+            "final_metrics": dict,
+            "best_metrics": dict,
+            "best_iteration": int,
+            "best_features": list[str],
+            "total_features_added": int,
+            "all_added_features": list[str],
+            "history": FeatureIterationHistory,
+            "summary": pd.DataFrame,
+        }
+        """
+        if verbose:
+            print("=" * 60)
+            print("FeatureIterationRunner — 特征工程迭代闭环")
+            print("=" * 60)
+            print(f"  初始特征数: {len(self.feature_cols)}")
+            print(f"  目标列: {self.target_col}")
+            print(f"  最大迭代轮次: {self.max_iterations}")
+            print(f"  LLM 模型: {self.llm_client.model}")
+            print(f"  LLM 模式: {'DRY RUN' if self.llm_client.dry_run else 'API'}")
+            print()
+
+        # ---- Round 0: Baseline ----
+        if verbose:
+            print("Round 0: Baseline 训练...")
+
+        self.baseline_metrics = self._retrain_and_eval(self.feature_cols)
+        self.best_val_metrics = dict(self.baseline_metrics)
+        self.best_features = list(self.feature_cols)
+
+        if verbose:
+            self._print_metrics("Baseline", self.baseline_metrics)
+
+        # ---- 迭代 ----
+        previous_metrics = dict(self.baseline_metrics)
+
+        for iteration in range(1, self.max_iterations + 1):
+            if verbose:
+                print(f"\n{'─' * 40}")
+                print(f"Round {iteration} / {self.max_iterations}")
+                print(f"{'─' * 40}")
+
+            # Step 1: 构建上下文
+            ctx = self._build_context(iteration, previous_metrics)
+
+            # Step 2: 调用 LLM（含重试）
+            llm_output = self._call_llm_with_retry(ctx, verbose)
+
+            if llm_output is None:
+                if verbose:
+                    print("  [STOP] LLM 调用失败，停止迭代")
+                break
+
+            # 空特征 → LLM 主动停止
+            if len(llm_output.get("new_features", [])) == 0:
+                if verbose:
+                    print(f"  [STOP] LLM 判断无需新增特征: {llm_output.get('analysis', '')}")
+                break
+
+            # Step 3: 执行特征生成
+            df_new, added_cols, skipped = execute_features_from_llm(
+                self.train_df, llm_output,
+                default_target_col=self.target_col,
+                default_time_col=self.time_col,
+            )
+            # 同时对 val/test 也生成
+            val_new, _, _ = execute_features_from_llm(
+                self.val_df, llm_output,
+                default_target_col=self.target_col,
+                default_time_col=self.time_col,
+            )
+            test_new, _, _ = execute_features_from_llm(
+                self.test_df, llm_output,
+                default_target_col=self.target_col,
+                default_time_col=self.time_col,
+            )
+
+            if not added_cols:
+                if verbose:
+                    print(f"  [WARNING] 特征生成失败，跳过本轮。跳过原因: {skipped}")
+                continue
+
+            # Step 4: 数据泄露检查
+            is_safe, leak_warnings = check_data_leakage(
+                df_new, added_cols, self.target_col, self.time_col, self.pred_horizon,
+            )
+            if verbose and leak_warnings:
+                for w in leak_warnings:
+                    print(f"  {w}")
+            if not is_safe:
+                if verbose:
+                    print("  [STOP] 检测到严重数据泄露，丢弃本轮特征")
+                continue
+
+            # Step 5: 更新特征列表 + 重新训练
+            new_feature_cols = self.feature_cols + added_cols
+            new_metrics = self._retrain_and_eval(new_feature_cols)
+
+            if new_metrics.get("RMSE", float("inf")) >= float("inf"):
+                if verbose:
+                    print("  [WARNING] 训练失败，丢弃本轮特征")
+                continue
+
+            # Step 6: 记录
+            self.history.record(
+                iteration=iteration,
+                llm_output=llm_output,
+                added_columns=added_cols,
+                skipped_features=skipped,
+                val_metrics_before=previous_metrics,
+                val_metrics_after=new_metrics,
+                analysis=llm_output.get("analysis", ""),
+            )
+
+            # Step 7: 更新状态
+            self.train_df = df_new
+            self.val_df = val_new
+            self.test_df = test_new
+            self.feature_cols = new_feature_cols
+            self.all_added_features.extend(added_cols)
+
+            if verbose:
+                self._print_metrics(f"Round {iteration}", new_metrics)
+                delta_rmse = new_metrics.get("RMSE", float("inf")) - previous_metrics.get("RMSE", float("inf"))
+                print(f"  ΔRMSE: {delta_rmse:+.4f}  |  新增特征: {added_cols}")
+
+            # 更新 best
+            if new_metrics.get("RMSE", float("inf")) < self.best_val_metrics.get("RMSE", float("inf")):
+                self.best_val_metrics = dict(new_metrics)
+                self.best_features = list(new_feature_cols)
+                self.best_iteration = iteration
+                if verbose:
+                    print(f"  * 新的 Best! RMSE={new_metrics['RMSE']:.4f}")
+
+            # Step 8: 检查是否提前停止
+            delta = new_metrics.get("RMSE", float("inf")) - previous_metrics.get("RMSE", float("inf"))
+            if abs(delta) < self.improvement_threshold:
+                if verbose:
+                    print(f"  [INFO] RMSE 改善 ({delta:+.6f}) < 阈值 ({self.improvement_threshold})")
+                # 小改善，继续但不强制停止（让 LLM 在下一轮自行判断）
+
+            previous_metrics = dict(new_metrics)
+
+        # ---- 汇总 ----
+        if verbose:
+            print(f"\n{'=' * 60}")
+            print("迭代完成!")
+            print(f"{'=' * 60}")
+
+        return self._build_result(verbose)
+
+    # --------------------------------------------------------
+    # 内部方法
+    # --------------------------------------------------------
+
+    def _build_context(self, iteration: int, previous_metrics: Dict) -> FeatureAgentContext:
+        """构建当前轮的 LLM 上下文。"""
+
+        # 计算特征重要性
+        feat_imp_df = self._compute_feature_importance()
+
+        # 构建基础上下文
+        ctx = build_context_from_data(
+            self.train_df,
+            target_col=self.target_col,
+            time_col=self.time_col,
+            feature_importance_df=feat_imp_df,
+            current_features=self.feature_cols,
+            val_metrics=self._flatten_metrics(previous_metrics),
+            dataset_name=self.dataset_name,
+            sampling_frequency=self.sampling_frequency,
+            prediction_horizon=self.pred_horizon,
+        )
+
+        # 叠加上一轮信息
+        if iteration > 1 and self.best_val_metrics:
+            ctx = build_iteration_context(
+                ctx,
+                iteration=iteration,
+                previous_val_metrics=previous_metrics,
+                previous_features_added=(
+                    self.all_added_features[-5:] if self.all_added_features else None
+                ),
+                max_iterations=self.max_iterations,
+            )
+
+        return ctx
+
+    def _call_llm_with_retry(
+        self, ctx: FeatureAgentContext, verbose: bool,
+    ) -> Optional[dict]:
+        """
+        调用 LLM 并在输出格式错误时自动重试。
+
+        重试策略：
+          - 第 1 次: 正常调用
+          - 第 2~3 次: 在 prompt 后追加错误信息，要求 LLM 修正
+        """
+        messages = build_messages(ctx)
+        error_history = []
+
+        for attempt in range(1, self.max_retries + 1):
+            if verbose:
+                print(f"  [LLM] 第 {attempt}/{self.max_retries} 次调用...")
+
+            try:
+                # 如果有错误历史，追加到 user message
+                if error_history:
+                    err_text = "\n\n".join(
+                        f"上一轮输出错误 #{i+1}: {err}"
+                        for i, err in enumerate(error_history)
+                    )
+                    correction_msg = (
+                        f"\n\n【重要】你的上一次输出有格式错误，请修正后重新输出:"
+                        f"\n{err_text}"
+                        f"\n\n请严格遵循 JSON 格式，不要包含任何额外文字。"
+                    )
+                    messages[-1]["content"] += correction_msg
+
+                raw = self.llm_client.chat(messages, temperature=0.2)
+
+                # 校验
+                available_cols = list(self.train_df.columns) + self.feature_cols
+                validated = validate_llm_output(raw, available_columns=available_cols)
+                return validated
+
+            except ValueError as e:
+                error_history.append(str(e))
+                if verbose:
+                    print(f"  [RETRY] 格式错误: {str(e)[:120]}...")
+
+            except RuntimeError as e:
+                if verbose:
+                    print(f"  [ERROR] LLM API 调用失败: {e}")
+                if attempt >= self.max_retries:
+                    return None
+
+        if verbose:
+            print(f"  [FAIL] {self.max_retries} 次重试后仍失败")
+        return None
+
+    def _retrain_and_eval(self, feature_cols: List[str]) -> Dict[str, float]:
+        """调用重训练回调，返回指标字典。"""
+        try:
+            return self.retrain_fn(
+                self.train_df, self.val_df, feature_cols, self.target_col,
+            )
+        except Exception as e:
+            return {"RMSE": float("inf"), "MAE": float("inf"), "error": str(e)}
+
+    def _compute_feature_importance(self) -> pd.DataFrame:
+        """
+        用 LightGBM 快速计算特征重要性。
+
+        Returns
+        -------
+        pd.DataFrame: columns = [feature, importance_gain, importance_gain_norm]
+        """
+        try:
+            import lightgbm as lgb
+
+            train_clean = self.train_df.dropna(
+                subset=self.feature_cols + [self.target_col]
+            )
+            if len(train_clean) < 50:
+                return pd.DataFrame()
+
+            train_data = lgb.Dataset(
+                train_clean[self.feature_cols], label=train_clean[self.target_col],
+            )
+            params = {
+                "objective": "regression",
+                "metric": "rmse",
+                "learning_rate": 0.1,
+                "num_leaves": 31,
+                "verbose": -1,
+                "seed": 42,
+                "num_threads": -1,
+            }
+
+            gbm = lgb.train(
+                params, train_data, num_boost_round=100,
+                callbacks=[lgb.log_evaluation(period=0)],
+            )
+
+            importance = gbm.feature_importance(importance_type="gain")
+            total = importance.sum()
+
+            return pd.DataFrame({
+                "feature": self.feature_cols,
+                "importance_gain": importance,
+                "importance_gain_norm": (
+                    importance / total * 100 if total > 0 else 0
+                ),
+            }).sort_values("importance_gain", ascending=False)
+
+        except Exception:
+            return pd.DataFrame()
+
+    def _flatten_metrics(self, metrics: Dict) -> Dict[str, float]:
+        """提取关键指标。"""
+        return {
+            k: v for k, v in metrics.items()
+            if k in ("RMSE", "MAE", "MAPE", "R2") and isinstance(v, (int, float))
+        }
+
+    def _print_metrics(self, label: str, metrics: Dict):
+        """打印指标。"""
+        rmse = metrics.get("RMSE", "?")
+        mae = metrics.get("MAE", "?")
+        mape = metrics.get("MAPE", "?")
+        r2 = metrics.get("R2", "?")
+        n = metrics.get("n_train", "?")
+        print(f"  [{label}] RMSE={rmse:.4f}" if isinstance(rmse, float) else f"  [{label}] RMSE={rmse}",
+              f"MAE={mae:.4f}" if isinstance(mae, float) else f"MAE={mae}",
+              f"MAPE={mape:.2f}%" if isinstance(mape, float) else f"MAPE={mape}",
+              f"R2={r2:.4f}" if isinstance(r2, float) else f"R2={r2}",
+              f"n={n}")
+
+    def _build_result(self, verbose: bool) -> Dict[str, Any]:
+        """构建最终结果字典。"""
+        final_metrics = self._retrain_and_eval(self.feature_cols)
+
+        if verbose:
+            print()
+            print(f"  初始特征数: {len(self.feature_cols) - len(self.all_added_features)}")
+            print(f"  最终特征数: {len(self.feature_cols)}")
+            print(f"  累计新增特征: {len(self.all_added_features)}")
+            print(f"  Best Iteration: {self.best_iteration}")
+            if self.best_val_metrics:
+                print(f"  Best Val RMSE: {self.best_val_metrics.get('RMSE', '?'):.4f}")
+            if self.baseline_metrics:
+                baseline_rmse = self.baseline_metrics.get("RMSE", float("inf"))
+                best_rmse = self.best_val_metrics.get("RMSE", float("inf"))
+                if isinstance(baseline_rmse, float) and isinstance(best_rmse, float):
+                    print(f"  RMSE 总改善: {baseline_rmse:.4f} → {best_rmse:.4f} "
+                          f"({(best_rmse - baseline_rmse):+.4f})")
+            print()
+            print("迭代历史:")
+            print(self.history.summary().to_string())
+
+        return {
+            "baseline_metrics": self.baseline_metrics,
+            "final_metrics": final_metrics,
+            "best_metrics": self.best_val_metrics,
+            "best_iteration": self.best_iteration,
+            "best_features": self.best_features,
+            "total_features_added": len(self.all_added_features),
+            "all_added_features": self.all_added_features,
+            "history": self.history,
+            "summary": self.history.summary(),
+        }
+
+
+# ============================================================
+# 12. 快速启动入口
+# ============================================================
+
+def run(
+    data_dir: Optional[str] = None,
+    task_id: int = 15,
+    api_key: Optional[str] = None,
+    model: str = None,
+    max_iterations: int = 5,
+    dry_run: bool = False,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    一键启动特征工程迭代闭环。
+
+    自动完成：
+      1. 加载 GEFCom2014 数据 + 预处理
+      2. 训练 LightGBM Baseline
+      3. 多轮 LLM 特征工程迭代
+      4. 输出完整迭代报告
+
+    Parameters
+    ----------
+    data_dir : str, optional
+        GEFCom2014-L_V2/Load 目录路径
+    task_id : int
+        Task 编号 1~15
+    api_key : str, optional
+        DashScope API Key。若为 None，从环境变量读取
+    model : str, optional
+        Qwen 模型 ID。默认 qwen-max (Qwen3.7 Max)
+    max_iterations : int
+        最大迭代轮次
+    dry_run : bool
+        Dry run 模式（不调用真实 LLM API）
+    verbose : bool
+        是否打印详细信息
+
+    Returns
+    -------
+    dict
+        包含 baseline_metrics, best_metrics, history, summary 等
+    """
+    import sys
+    from pathlib import Path
+
+    # ---- 路径 ----
+    if data_dir is None:
+        data_dir = str(
+            Path(__file__).resolve().parent.parent / "GEFCom2014-L_V2" / "Load"
+        )
+
+    # ---- 加载数据 ----
+    if verbose:
+        print("Step 1: 加载并预处理数据...")
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from data.preprocessing import preprocess_pipeline
+
+    result = preprocess_pipeline(
+        data_dir=data_dir,
+        task_id=task_id,
+        fill_load="interpolate",
+        fill_weather="interpolate",
+        split_method="sequential",
+        dropna_features=True,
+    )
+
+    train_df = result["train"]
+    val_df = result["val"]
+    test_df = result["test"]
+    feature_cols = result["feature_cols"]
+    target_col = result["target_col"]
+
+    if verbose:
+        print(f"  Train: {train_df.shape}, Val: {val_df.shape}, Test: {test_df.shape}")
+        print(f"  初始特征数: {len(feature_cols)}")
+
+    # ---- LLM 客户端 ----
+    if dry_run:
+        llm_client = QwenClient(dry_run=True)
+    else:
+        try:
+            llm_client = QwenClient(api_key=api_key, model=model)
+        except ValueError as e:
+            if verbose:
+                print(f"\n[WARNING] {e}")
+                print("[INFO] 自动切换为 dry_run 模式\n")
+            llm_client = QwenClient(dry_run=True)
+
+    # ---- 启动迭代 ----
+    if verbose:
+        print("\nStep 2: 启动特征工程迭代...\n")
+
+    runner = FeatureIterationRunner(
+        train_df=train_df,
+        val_df=val_df,
+        test_df=test_df,
+        feature_cols=feature_cols,
+        target_col=target_col,
+        time_col="datetime" if "datetime" in train_df.columns else train_df.index.name,
+        llm_client=llm_client,
+        max_iterations=max_iterations,
+        pred_horizon=1,
+        dataset_name=f"GEFCom2014 Task {task_id}",
+    )
+
+    output = runner.run(verbose=verbose)
+    return output
+
+
+# ============================================================
 # 测试
 # ============================================================
 if __name__ == "__main__":
@@ -2022,6 +2962,156 @@ if __name__ == "__main__":
     sys3 = build_system_prompt("PRICE", "date")
     assert "PRICE" in sys3 and "date" in sys3
     print(f"  [OK] System Prompt 支持不同 target_col/time_col")
+
+    print()
+    print("=" * 60)
+    print("11. QwenClient 测试")
+    print("=" * 60)
+
+    # 11a. dry_run 模式
+    client = QwenClient(dry_run=True)
+    assert client.dry_run is True
+    response = client.chat([
+        {"role": "system", "content": "你是专家"},
+        {"role": "user", "content": "设计特征"},
+    ])
+    # 验证 dry run 返回合法 JSON
+    parsed = json.loads(response)
+    assert "iteration" in parsed
+    assert "new_features" in parsed
+    assert len(parsed["new_features"]) >= 1
+    print(f"  [OK] dry_run 模式返回合法 JSON ({len(parsed['new_features'])} 个特征)")
+    print(f"  model: {client.model}")
+
+    # 11b. 无 API Key 时抛错
+    import os
+    old_key = os.environ.pop("DASHSCOPE_API_KEY", None)
+    try:
+        QwenClient()  # 应抛 ValueError
+        assert False, "应该抛出 ValueError"
+    except ValueError as e:
+        assert "DASHSCOPE_API_KEY" in str(e)
+        print(f"  [OK] 无 API Key → ValueError (含 'DASHSCOPE_API_KEY')")
+    finally:
+        if old_key:
+            os.environ["DASHSCOPE_API_KEY"] = old_key
+
+    print()
+    print("=" * 60)
+    print("12. 数据泄露检查测试")
+    print("=" * 60)
+
+    # 构造含不同风险级别特征的 DataFrame
+    n_test = 100
+    dates = pd.date_range("2020-01-01", periods=n_test, freq="h")
+    df_leak = pd.DataFrame({
+        "datetime": dates,
+        "LOAD": np.sin(np.arange(n_test) / 24) * 50 + 500,
+        "temp": np.sin(np.arange(n_test) / 24) * 10 + 20,
+    })
+
+    # 添加正常的滞后特征
+    df_leak["LOAD_lag_24"] = df_leak["LOAD"].shift(24)
+    df_leak["temp_lag_3"] = df_leak["temp"].shift(3)
+
+    # 添加正常的滚动特征
+    df_leak["LOAD_rolling_24_mean"] = df_leak["LOAD"].rolling(24).mean()
+
+    # 12a: 正常特征 → 通过
+    is_safe, warnings = check_data_leakage(
+        df_leak, ["LOAD_lag_24", "temp_lag_3"], "LOAD",
+    )
+    assert is_safe, f"正常 lag 应通过检查，warnings: {warnings}"
+    print(f"  [OK] 正常 lag 特征通过检查")
+
+    # 12b: 滚动特征含 target → 有提示
+    is_safe2, warnings2 = check_data_leakage(
+        df_leak, ["LOAD_rolling_24_mean"], "LOAD",
+    )
+    assert is_safe2, "滚动特征不应被硬阻止"
+    assert any("滚动" in w for w in warnings2), f"应有滚动提醒: {warnings2}"
+    print(f"  [OK] 目标列滚动特征给出提醒（不阻止）: {warnings2[0][:60]}...")
+
+    # 12c: lag=0 → 应被标记
+    df_leak["LOAD_lag_0"] = df_leak["LOAD"]  # 模拟 lag=0
+    is_safe3, warnings3 = check_data_leakage(
+        df_leak, ["LOAD_lag_0"], "LOAD",
+    )
+    assert not is_safe3, "lag=0 应被视为泄露"
+    print(f"  [OK] lag=0 被正确标记为泄露")
+
+    print()
+    print("=" * 60)
+    print("13. FeatureIterationRunner 集成测试 (dry run)")
+    print("=" * 60)
+
+    # 准备数据
+    n_runner = 300
+    dates_runner = pd.date_range("2020-01-01", periods=n_runner, freq="h")
+    base_load = (
+        500
+        + 50 * np.sin(2 * np.pi * np.arange(n_runner) / 24)
+        + 30 * np.sin(2 * np.pi * np.arange(n_runner) / 168)
+    )
+    train_df_runner = pd.DataFrame({
+        "datetime": dates_runner[:200],
+        "LOAD": base_load[:200] + np.random.normal(0, 10, 200),
+        "temp": 20 + 10 * np.sin(2 * np.pi * np.arange(200) / 24) + np.random.normal(0, 3, 200),
+    })
+    val_df_runner = pd.DataFrame({
+        "datetime": dates_runner[200:250],
+        "LOAD": base_load[200:250] + np.random.normal(0, 10, 50),
+        "temp": 20 + 10 * np.sin(2 * np.pi * np.arange(200, 250) / 24) + np.random.normal(0, 3, 50),
+    })
+    test_df_runner = pd.DataFrame({
+        "datetime": dates_runner[250:300],
+        "LOAD": base_load[250:300] + np.random.normal(0, 10, 50),
+        "temp": 20 + 10 * np.sin(2 * np.pi * np.arange(250, 300) / 24) + np.random.normal(0, 3, 50),
+    })
+
+    # 添加一些基础特征
+    for d in [train_df_runner, val_df_runner, test_df_runner]:
+        d["lag_1"] = d["LOAD"].shift(1)
+        d["lag_24"] = d["LOAD"].shift(24)
+        d["hour"] = d["datetime"].apply(lambda x: x.hour if hasattr(x, 'hour') else 0)
+        d["weekday"] = d["datetime"].apply(lambda x: x.weekday() if hasattr(x, 'weekday') else 0)
+
+    # 清理 NaN
+    train_df_runner = train_df_runner.dropna()
+    val_df_runner = val_df_runner.dropna()
+    test_df_runner = test_df_runner.dropna()
+
+    baseline_features = ["lag_1", "lag_24", "hour", "weekday", "temp"]
+
+    # 创建 runner (dry run)
+    runner = FeatureIterationRunner(
+        train_df=train_df_runner,
+        val_df=val_df_runner,
+        test_df=test_df_runner,
+        feature_cols=baseline_features,
+        target_col="LOAD",
+        time_col="datetime",
+        llm_client=QwenClient(dry_run=True),
+        max_iterations=3,
+        dataset_name="GEFCom2014 Task 15 (test)",
+    )
+
+    result = runner.run(verbose=False)
+
+    # 验证
+    assert "baseline_metrics" in result
+    assert "best_metrics" in result
+    assert "summary" in result
+    assert result["total_features_added"] >= 0
+    assert result["history"] is not None
+    print(f"  Baseline RMSE: {result['baseline_metrics'].get('RMSE', '?'):.4f}")
+    print(f"  Best RMSE: {result['best_metrics'].get('RMSE', '?'):.4f}")
+    print(f"  Best Iteration: {result['best_iteration']}")
+    print(f"  新增特征总数: {result['total_features_added']}")
+    print(f"  新增特征列表: {result['all_added_features']}")
+    print()
+    print(result["summary"].to_string())
+    print(f"  [OK] FeatureIterationRunner 集成测试通过")
 
     print()
     print("=" * 60)
