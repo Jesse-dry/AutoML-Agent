@@ -27,7 +27,8 @@ AutoML-Agent/
 │   └── data_loader.py                # 滑动窗口 DataLoader（StandardScaler + shuffle 控制）
 │
 ├── agent/
-│   ├── feature_agent.py              # (TODO) LLM 特征工程 Agent
+│   ├── feature_engine.py             # 特征执行引擎（确定性函数库：lag/rolling/time/cross）
+│   ├── feature_agent.py              # LLM 特征工程 Agent（I/O 协议 + 上下文构建 + 输出校验）
 │   ├── tuning_agent.py               # (TODO) 超参调优 Agent
 │   └── report_agent.py               # (TODO) 报告生成 Agent
 │
@@ -98,6 +99,129 @@ python models/PatchTST/patch_tst_baseline.py --task 15 --max-epochs 200 --patien
 - `patchtst_baseline_task15_best.pt` — 最佳 checkpoint
 - `patchtst_baseline_task15_metrics.json` — 结构化指标（与 LGB/LSTM 同格式）
 - `patchtst_baseline_task15_predictions.csv` — 测试集预测结果
+
+---
+
+## 特征工程系统 (LLM Agent 核心)
+
+这是整个项目最核心的模块，体现 LLM + 自动化的价值。
+架构分为两层：**执行引擎**（确定性函数）和 **Agent 协议**（LLM 决策 + 输入输出规范）。
+
+### 架构
+
+```
+┌─────────────────────────────────────────────┐
+│  feature_engine.py (执行引擎)                │
+│  generate_lag_features / generate_rolling   │
+│  generate_time_features / generate_cross     │
+│  → 所有特征生成是确定性函数，LLM 不写代码     │
+└────────────────────┬────────────────────────┘
+                     │ 被调用
+┌────────────────────▼────────────────────────┐
+│  feature_agent.py (Agent 协议)               │
+│  Context Builder → Prompt 渲染 → LLM 调用    │
+│  → JSON Schema 校验 → execute_features_from_llm│
+│  → LLM 只负责「决策生成什么特征」             │
+└─────────────────────────────────────────────┘
+```
+
+### 特征执行引擎 (`agent/feature_engine.py`)
+
+4 种特征类型的确定性函数，输入 DataFrame → 输出追加新列后的 DataFrame：
+
+```python
+from agent.feature_engine import (
+    generate_lag_features,
+    generate_rolling_features,
+    generate_time_features,
+    generate_cross_features,
+    generate_all_features,
+)
+
+# 1. 滞后特征 — 捕获历史值对未来的影响
+df = generate_lag_features(df, "LOAD", [1, 2, 24, 168])
+
+# 2. 滚动窗口统计 — 捕获局部趋势
+df = generate_rolling_features(df, "LOAD", [6, 24], stats=["mean", "std", "max", "min"])
+
+# 3. 时间特征 — 从 datetime 提取 + sin/cos 周期性编码
+df = generate_time_features(df, "datetime", cyclical=True)
+
+# 4. 交叉特征 — 两列算术运算
+df = generate_cross_features(df, "temp", "LOAD", "multiply")
+
+# 5. 一键批量生成 + 生成报告
+df, report = generate_all_features(
+    df, target_col="LOAD", time_col="datetime",
+    cross_pairs=[("temp", "LOAD", "multiply")]
+)
+# report → {"n_original_cols": 4, "n_new_cols": 36, "new_columns": [...], ...}
+```
+
+### LLM Agent 协议 (`agent/feature_agent.py`)
+
+**输入上下文**（自动从数据构建）：
+
+```python
+from agent.feature_agent import build_context_from_data, build_llm_prompt
+
+ctx = build_context_from_data(
+    train_df,
+    target_col="LOAD",
+    time_col="datetime",
+    feature_importance_df=feat_imp_df,   # 来自 LightGBM
+    val_metrics={"RMSE": 8.53, "MAE": 6.70},
+)
+
+# 渲染 LLM Prompt（含数据集统计 + ACF + 特征重要性 + 迭代历史）
+prompt = build_llm_prompt(ctx)
+# → 发送给任意支持 JSON 输出的 LLM
+```
+
+**LLM 严格输出格式**（JSON Schema 校验）：
+
+```json
+{
+  "iteration": 1,
+  "analysis": "日周期性显著(ACF_24=0.80)，温度与负荷相关性强，建议增加温度滞后和滚动峰谷统计",
+  "new_features": [
+    {"name": "lag_72_load", "type": "lag", "target_col": "LOAD", "params": {"lag": 72}},
+    {"name": "rolling_max_24_load", "type": "rolling", "target_col": "LOAD", "params": {"window": 24, "stat": "max"}},
+    {"name": "cross_temp_load", "type": "cross", "params": {"col1": "temp", "col2": "LOAD", "operation": "multiply"}}
+  ]
+}
+```
+
+**输出校验 + 执行**：
+
+```python
+from agent.feature_agent import validate_llm_output, execute_features_from_llm
+
+# 多层校验：JSON 结构 → 参数字段 → 类型/范围 → 列名存在性
+validated = validate_llm_output(llm_json_str, available_columns=df.columns.tolist())
+
+# 自动翻译为 feature_engine 调用
+df_new, added_cols, skipped = execute_features_from_llm(df, validated)
+```
+
+**迭代上下文**：自动追踪指标 delta，帮助 LLM 判断上一轮特征是否有效。
+
+```python
+from agent.feature_agent import build_iteration_context, FeatureIterationHistory
+
+# 构建带历史的迭代上下文
+ctx_iter = build_iteration_context(
+    ctx, iteration=2,
+    previous_val_metrics={"RMSE": 8.53},
+    previous_features_added=["lag_72_load", "rolling_max_24_load"],
+)
+
+# 追踪器自动记录每轮变化 + 识别 best iteration
+history = FeatureIterationHistory()
+history.record(...)
+print(history.summary())          # DataFrame 概览
+print(history.best_iteration())   # RMSE 改善最大的轮次
+```
 
 ---
 
