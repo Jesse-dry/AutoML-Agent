@@ -1,8 +1,86 @@
 # AutoML-Agent
 
-LLM-driven AutoML Agent for Short-term Electricity Load Forecasting with Automated Feature Engineering and Hyperparameter Optimization.
+LLM 驱动的 AutoML Agent —— 面向短期电力负荷预测的**自动化特征工程**与**闭环迭代优化**系统。
 
-数据集：[GEFCom2014-L_V2](https://www.sciencedirect.com/journal/international-journal-of-forecasting/vol/30/issue/2)（Global Energy Forecasting Competition 2014，负荷预测赛道）
+**核心创新**：大语言模型（LLM）不写代码，而是作为"决策大脑"，基于数据统计、自相关分析（ACF）、特征重要性和历史迭代反馈，**自主决定**生成什么特征；确定性执行引擎负责**安全执行**。两者构成一个完整的 **感知→决策→执行→评估→反馈** 闭环。
+
+数据集：[GEFCom2014-L_V2](https://www.sciencedirect.com/journal/international-journal-of-forecasting/vol/30/issue/2)（Global Energy Forecasting Competition 2014，负荷预测赛道，含 15 个任务）
+
+> **计划扩展**：后续将陆续增加更多电力负荷预测数据集，覆盖不同地区、时间粒度和数据特征，以验证模型和特征工程策略的通用性与鲁棒性。
+
+---
+
+## 整体架构
+
+```
+               GEFCom2014-L_V2 数据集
+                       │
+                       ▼
+           data/preprocessing.py
+     (时间戳解析 → 缺失填充 → 切分 → 基线特征)
+                       │
+                       ▼
+              Train / Val / Test
+                       │
+     ┌─────────────────┼─────────────────┐
+     ▼                 ▼                  ▼
+  LightGBM           LSTM            PatchTST
+  (树模型基线)     (循环网络基线)    (Transformer基线)
+     │                 │                  │
+     ▼                 ▼                  ▼
+  特征重要性        train/val/test 三阶段指标（原始量纲）
+     │                 │
+     └────────┬────────┘
+              │
+              ▼
+ ┌────────────────────────────────────────────┐
+ │       LLM 特征工程闭环 (核心模块)            │
+ │                                            │
+ │  ┌──────────────────────────────────┐      │
+ │  │ Context Builder                  │      │
+ │  │ 数据集统计 + ACF + 特征重要性     │      │
+ │  │ + 趋势/季节性 + 历史 delta 指标   │      │
+ │  └────────────┬─────────────────────┘      │
+ │               ▼                            │
+ │  ┌──────────────────────────────────┐      │
+ │  │ System Prompt + User Prompt      │      │
+ │  │ 角色/约束/领域知识/迭代历史       │      │
+ │  └────────────┬─────────────────────┘      │
+ │               ▼                            │
+ │  ┌──────────────────────────────────┐      │
+ │  │ Qwen LLM (DashScope API)         │      │
+ │  │ AI 自主分析数据 → 输出特征方案    │      │
+ │  └────────────┬─────────────────────┘      │
+ │               ▼                            │
+ │  ┌──────────────────────────────────┐      │
+ │  │ JSON Schema 校验 + 重试 (≤3次)    │      │
+ │  └────────────┬─────────────────────┘      │
+ │               ▼                            │
+ │  ┌──────────────────────────────────┐      │
+ │  │ feature_engine 确定性执行         │      │
+ │  │ LLM 不写代码，只决定"做什么"      │      │
+ │  └────────────┬─────────────────────┘      │
+ │               ▼                            │
+ │  ┌──────────────────────────────────┐      │
+ │  │ 数据泄露检查 check_data_leakage() │      │
+ │  │ 时间因果性自动校验                │      │
+ │  └────────────┬─────────────────────┘      │
+ │               ▼                            │
+ │  ┌──────────────────────────────────┐      │
+ │  │ LightGBM 重训练 → 新指标          │      │
+ │  └────────────┬─────────────────────┘      │
+ │               ▼                            │
+ │  ┌──────────────────────────────────┐      │
+ │  │ 记录迭代历史 + 判断是否继续       │      │
+ │  │ RMSE 改善 → 下一轮 / 退化 → 终止  │      │
+ │  └──────────────────────────────────┘      │
+ │                                            │
+ └────────────────────────────────────────────┘
+              │
+              ▼
+     实验产出 (experiments/)
+     result.json / history.csv / best_features.txt / metrics_curve.png
+```
 
 ---
 
@@ -11,29 +89,64 @@ LLM-driven AutoML Agent for Short-term Electricity Load Forecasting with Automat
 ```
 AutoML-Agent/
 ├── data/
-│   ├── preprocessing.py              # 数据预处理流水线（时间解析+缺失填充+特征工程+时序切分）
-│   └── README_preprocessing.md       # 预处理详解（个人笔记，不入库）
+│   └── preprocessing.py                 # 数据预处理流水线
 │
 ├── models/
 │   ├── baseline/
-│   │   └── lgb_gefcom2014.py         # LightGBM 基线（特征重要性→LLM Agent）
+│   │   └── lgb_gefcom2014.py            # LightGBM 基线（产出特征重要性供 Agent 使用）
 │   ├── LSTM/
-│   │   └── LSTM_baseline.py          # LSTM 基线（滑动窗口+归一化+早停）
-│   ├── Transformer/                  # (TODO) Transformer 模型
-│   └── PatchTST/                     # (TODO) PatchTST 模型
+│   │   └── LSTM_baseline.py             # LSTM 基线（滑动窗口 + 归一化 + 早停）
+│   ├── PatchTST/
+│   │   ├── patch_tst_baseline.py        # PatchTST 训练脚本 (ICLR 2023)
+│   │   ├── PatchTST_backbone.py         # Patching + Channel-Independent Transformer
+│   │   ├── PatchTST_layers.py           # 自定义 Transformer 层
+│   │   └── RevIN.py                     # 可逆实例归一化
+│   └── Transformer/                     # (TODO) Transformer 模型
 │
 ├── utils/
-│   ├── metrics.py                    # 通用评估指标：RMSE / MAE / MAPE / SMAPE / R²
-│   └── data_loader.py                # 滑动窗口 DataLoader（StandardScaler + shuffle 控制）
+│   ├── metrics.py                       # 通用评估指标（RMSE/MAE/MAPE/SMAPE/R²）
+│   └── data_loader.py                   # 滑动窗口 DataLoader（StandardScaler + shuffle）
 │
 ├── agent/
-│   ├── feature_engine.py             # 特征执行引擎（确定性函数库：lag/rolling/time/cross）
-│   ├── feature_agent.py              # LLM 特征工程 Agent（I/O 协议 + 上下文构建 + 输出校验）
-│   ├── tuning_agent.py               # (TODO) 超参调优 Agent
-│   └── report_agent.py               # (TODO) 报告生成 Agent
+│   ├── feature_engine.py                # 确定性特征执行引擎（lag/rolling/time/cross）
+│   ├── feature_agent.py                 # LLM Agent 协议 + 闭环迭代调度器
+│   ├── tuning_agent.py                  # (TODO) 超参调优 Agent
+│   └── report_agent.py                  # (TODO) 报告生成 Agent
 │
-└── experiments/                      # 实验结果存放
+├── experiments/
+│   ├── run_feature_agent.py             # 端到端特征工程实验脚本（CLI）
+│   └── feature_agent_task15/            # Task 15 实验输出
+│
+└── GEFCom2014-L_V2/                     # 数据集 (gitignored)
 ```
+
+---
+
+## 环境配置
+
+### 依赖
+
+- Python 3.12+
+- `pandas`, `numpy`
+- `scikit-learn`
+- `lightgbm`
+- `torch` (PyTorch)
+- `matplotlib`
+- `requests`
+
+```bash
+pip install pandas numpy scikit-learn lightgbm torch matplotlib requests
+```
+
+### LLM API 配置
+
+项目使用阿里云 DashScope 大模型 API（Qwen 系列）。在项目根目录创建 `.env` 文件：
+
+```env
+DASHSCOPE_API_KEY=sk-ws-your-api-key-here
+```
+
+> 使用 OpenAI 兼容接口。如需切换其他 LLM 提供商，修改 `agent/feature_agent.py` 中 `QwenClient` 的 `base_url` 和 `model` 参数即可。
 
 ---
 
@@ -56,7 +169,9 @@ train_df, val_df, test_df = result["train"], result["val"], result["test"]
 feature_cols, target_col = result["feature_cols"], result["target_col"]
 ```
 
-### 2. LightGBM 基线
+### 2. 训练基线模型
+
+**LightGBM：**
 
 ```bash
 python models/baseline/lgb_gefcom2014.py --task 15
@@ -64,50 +179,62 @@ python models/baseline/lgb_gefcom2014.py --task 15
 
 产出：
 - `lgb_baseline_task15.txt` — 训练好的模型
-- `lgb_baseline_task15_metrics.json` — 结构化指标字典
+- `lgb_baseline_task15_metrics.json` — train/val/test 三阶段指标
 - `lgb_baseline_task15_feature_importance.csv` — 特征重要性（供 LLM Agent 使用）
 - `lgb_baseline_task15_predictions.csv` — 测试集预测结果
 
-### 3. LSTM 基线
+**LSTM：**
 
 ```bash
 python models/LSTM/LSTM_baseline.py --task 15 --max-epochs 200 --patience 20
 ```
 
-核心流程：`StandardScaler 归一化 → 滑动窗口 → LSTM 训练 → 早停 → inverse_transform → 指标`
-
-产出：
-- `lstm_baseline_task15_best.pt` — 最佳 checkpoint
-- `lstm_baseline_task15_metrics.json` — 结构化指标（与 LGB 同格式）
-- `lstm_baseline_task15_predictions.csv` — 测试集预测结果
-
-### 4. PatchTST 基线
+**PatchTST：**
 
 ```bash
 python models/PatchTST/patch_tst_baseline.py --task 15 --max-epochs 200 --patience 20
 ```
 
-核心流程：`StandardScaler → 滑动窗口 → Patching → Channel-Independent Transformer → RevIN 逆归一化 → 指标`
+> 所有模型输出统一格式的 `metrics.json`（由 `utils/metrics.py` 的 `compute_all_metrics()` 保证），可直接横向对比。
 
-关键参数：
-- `--seq-len` 历史窗口（默认 48 小时）
-- `--patch-len` / `--stride` 控制 patch 切分（默认自动选择）
-- `--d-model` / `--n-heads` / `--n-layers` 控制 Transformer 规模
-- `--no-revin` 禁用 RevIN
+### 3. 运行 LLM 特征工程实验
 
-产出：
-- `patchtst_baseline_task15_best.pt` — 最佳 checkpoint
-- `patchtst_baseline_task15_metrics.json` — 结构化指标（与 LGB/LSTM 同格式）
-- `patchtst_baseline_task15_predictions.csv` — 测试集预测结果
+```bash
+# 真实 LLM 调用
+python experiments/run_feature_agent.py --task 15 --max-iter 5
+
+# 测试模式（不调用 LLM，使用内置示例输出）
+python experiments/run_feature_agent.py --task 15 --max-iter 3 --dry-run
+```
+
+产出（保存至 `experiments/feature_agent_task15/`）：
+- `result_*.json` — 基线 vs 最优迭代指标对比
+- `iteration_history_*.csv` — 每轮迭代的特征数、RMSE、MAE、MAPE
+- `best_features_*.txt` — 最优迭代使用的完整特征列表
+- `metrics_curve_*.png` — RMSE/MAE/MAPE 三面板迭代曲线图
+
+### 4. 编程方式调用
+
+```python
+from agent.feature_agent import run
+
+# 一行启动完整闭环
+result = run(
+    data_dir="GEFCom2014-L_V2/Load",
+    task_id=15,
+    max_iterations=5,
+    dry_run=False,
+)
+print(result["baseline_metrics"])  # 基线指标
+print(result["best_metrics"])      # 最优迭代指标
+print(result["iterations"])        # 迭代历史列表
+```
 
 ---
 
-## 特征工程系统 (LLM Agent 核心)
+## 特征工程系统详解
 
-这是整个项目最核心的模块，体现 LLM + 自动化的价值。
-架构分为两层：**执行引擎**（确定性函数）和 **Agent 协议**（LLM 决策 + 输入输出规范）。
-
-### 架构
+这是整个项目最核心的模块，体现 LLM + 自动化的价值。架构分为两层：**执行引擎**（确定性函数）和 **Agent 协议**（LLM 决策）。
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -121,6 +248,7 @@ python models/PatchTST/patch_tst_baseline.py --task 15 --max-epochs 200 --patien
 │  feature_agent.py (Agent 协议)               │
 │  Context Builder → Prompt 渲染 → LLM 调用    │
 │  → JSON Schema 校验 → execute_features_from_llm│
+│  → 数据泄露检查 → 重训练 → 记录迭代历史        │
 │  → LLM 只负责「决策生成什么特征」             │
 └─────────────────────────────────────────────┘
 ```
@@ -141,13 +269,13 @@ from agent.feature_engine import (
 # 1. 滞后特征 — 捕获历史值对未来的影响
 df = generate_lag_features(df, "LOAD", [1, 2, 24, 168])
 
-# 2. 滚动窗口统计 — 捕获局部趋势
+# 2. 滚动窗口统计 — 捕获局部趋势与波动
 df = generate_rolling_features(df, "LOAD", [6, 24], stats=["mean", "std", "max", "min"])
 
 # 3. 时间特征 — 从 datetime 提取 + sin/cos 周期性编码
 df = generate_time_features(df, "datetime", cyclical=True)
 
-# 4. 交叉特征 — 两列算术运算
+# 4. 交叉特征 — 两列算术运算（如温度 × 负荷）
 df = generate_cross_features(df, "temp", "LOAD", "multiply")
 
 # 5. 一键批量生成 + 生成报告
@@ -155,27 +283,30 @@ df, report = generate_all_features(
     df, target_col="LOAD", time_col="datetime",
     cross_pairs=[("temp", "LOAD", "multiply")]
 )
-# report → {"n_original_cols": 4, "n_new_cols": 36, "new_columns": [...], ...}
 ```
 
 ### LLM Agent 协议 (`agent/feature_agent.py`)
 
-**输入上下文**（自动从数据构建）：
+**输入上下文**（自动从数据构建，5 层信息）：
+
+| 层级 | 内容 | 用途 |
+|------|------|------|
+| A | 数据集基本信息（行数、列数、时间范围） | 了解数据规模 |
+| B | 目标变量统计（均值、标准差、变异系数、分位数） | 了解预测目标特性 |
+| C | 时序分析（ACF 摘要 + 趋势 + 季节性强度） | 识别时间依赖模式 |
+| D | 当前特征 + 模型指标 | 了解现有特征和模型表现 |
+| E | 迭代历史（已添加特征 + 指标 delta） | 判断上轮特征是否有效 |
 
 ```python
-from agent.feature_agent import build_context_from_data, build_llm_prompt
+from agent.feature_agent import build_context_from_data
 
 ctx = build_context_from_data(
     train_df,
     target_col="LOAD",
     time_col="datetime",
-    feature_importance_df=feat_imp_df,   # 来自 LightGBM
+    feature_importance_df=feat_imp_df,    # 来自 LightGBM
     val_metrics={"RMSE": 8.53, "MAE": 6.70},
 )
-
-# 渲染 LLM Prompt（含数据集统计 + ACF + 特征重要性 + 迭代历史）
-prompt = build_llm_prompt(ctx)
-# → 发送给任意支持 JSON 输出的 LLM
 ```
 
 **LLM 严格输出格式**（JSON Schema 校验）：
@@ -197,31 +328,22 @@ prompt = build_llm_prompt(ctx)
 ```python
 from agent.feature_agent import validate_llm_output, execute_features_from_llm
 
-# 多层校验：JSON 结构 → 参数字段 → 类型/范围 → 列名存在性
+# 多层校验：JSON 解析 → 结构 → 参数字段 → 类型/范围 → 列名存在性
 validated = validate_llm_output(llm_json_str, available_columns=df.columns.tolist())
 
 # 自动翻译为 feature_engine 调用
 df_new, added_cols, skipped = execute_features_from_llm(df, validated)
 ```
 
-**迭代上下文**：自动追踪指标 delta，帮助 LLM 判断上一轮特征是否有效。
+### 安全机制
 
-```python
-from agent.feature_agent import build_iteration_context, FeatureIterationHistory
-
-# 构建带历史的迭代上下文
-ctx_iter = build_iteration_context(
-    ctx, iteration=2,
-    previous_val_metrics={"RMSE": 8.53},
-    previous_features_added=["lag_72_load", "rolling_max_24_load"],
-)
-
-# 追踪器自动记录每轮变化 + 识别 best iteration
-history = FeatureIterationHistory()
-history.record(...)
-print(history.summary())          # DataFrame 概览
-print(history.best_iteration())   # RMSE 改善最大的轮次
-```
+| 机制 | 说明 |
+|------|------|
+| **时间因果约束** | System Prompt 明确禁止使用未来信息；lag 必须 > 0 |
+| **数据泄露检查** | `check_data_leakage()` 自动扫描新特征的时间因果性 |
+| **安全 lag 上限** | 自动限制 lag/rolling window ≤ 验证集最小时间间隔，防止 NaN 泛滥 |
+| **LLM 输出校验** | JSON Schema 多层校验 + 最多 3 次重试（错误信息反馈给 LLM 自我修正） |
+| **确定性执行** | LLM 不生成代码，只输出结构化决策 → 执行引擎翻译为安全的函数调用 |
 
 ---
 
@@ -233,16 +355,26 @@ print(history.best_iteration())   # RMSE 改善最大的轮次
 | LSTM | 6.07 | 3.97% | 6.20 | 4.04% | 11.70 | 6.94% | 54,849 |
 | **PatchTST** | **2.63** | **1.57%** | **3.22** | **1.95%** | **2.84** | **1.63%** | 139,301 |
 
-> **PatchTST 全面最优**：通过 patching 将时序切分为 subseries-level tokens，配合通道独立 Transformer + RevIN 归一化，在全部三个集合上大幅领先。Test RMSE（2.84）仅为 LightGBM（9.23）的 31%，LSTM（11.70）的 24%。
+> **PatchTST 全面最优**：通过 patching 将时序切分为 subseries-level tokens，配合通道独立 Transformer + RevIN 归一化，在全部三个集合上大幅领先。Test RMSE（2.84）仅为 LightGBM（9.23）的 31%。
 >
 > LSTM 过拟合明显（Train 6.07 → Test 11.70），LightGBM 泛化更稳（Train 7.74 → Test 9.23），PatchTST 泛化最佳（Train 2.63 → Test 2.84）。
 
 ---
 
-## 环境
+## 设计原则
 
-- Python 3.12+
-- PyTorch
-- LightGBM
-- scikit-learn
-- pandas, numpy
+1. **关注点分离**：LLM 负责"决策"（生成什么特征），执行引擎负责"执行"（确定性函数），LLM 从不写代码
+2. **统一指标接口**：所有模型共用 `utils/metrics.py`，确保指标定义一致、可直接横向对比
+3. **闭环自优化**：LLM 每轮接收 delta 指标，能判断上轮特征是否有效并自我纠偏
+4. **安全优先**：时间因果性是最高优先级的约束，System Prompt + 代码检查双重保障
+5. **鲁棒重试**：LLM 输出不符合 Schema 时自动重试（最多 3 次），错误信息即时反馈
+
+---
+
+## TODO
+
+- [ ] 超参调优 Agent (`agent/tuning_agent.py`)
+- [ ] 报告生成 Agent (`agent/report_agent.py`)
+- [ ] Transformer 基线模型 (`models/Transformer/`)
+- [ ] 多任务并行特征工程
+- [ ] 模型选择 Agent（自动选择最优模型类型）
