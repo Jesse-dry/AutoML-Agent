@@ -1,0 +1,54 @@
+{
+  "timestamp": "20260726_223949",
+  "task": 15,
+  "max_iterations": 2,
+  "baseline_metrics": {
+    "RMSE": 8.5108,
+    "MAE": 6.5847,
+    "MAPE": 4.88,
+    "R2": 0.7784,
+    "best_iteration": 37,
+    "n_train": 386,
+    "n_val": 82
+  },
+  "best_metrics": {
+    "RMSE": 8.5108,
+    "MAE": 6.5847,
+    "MAPE": 4.88,
+    "R2": 0.7784,
+    "best_iteration": 37,
+    "n_train": 386,
+    "n_val": 82
+  },
+  "final_metrics": {
+    "RMSE": 8.5108,
+    "MAE": 6.5847,
+    "MAPE": 4.88,
+    "R2": 0.7784,
+    "best_iteration": 37,
+    "n_train": 386,
+    "n_val": 82
+  },
+  "best_iteration": 0,
+  "total_features_added": 0,
+  "all_added_features": [],
+  "best_features": [
+    "hour",
+    "weekday",
+    "month",
+    "is_weekend",
+    "lag_1",
+    "lag_24",
+    "lag_168",
+    "temp",
+    "temp_lag_24",
+    "temp_mean",
+    "temp_min",
+    "temp_max",
+    "temp_std",
+    "rolling_mean_24_load",
+    "rolling_std_24_load",
+    "rolling_mean_168_load",
+    "rolling_mean_24_temp"
+  ]
+}

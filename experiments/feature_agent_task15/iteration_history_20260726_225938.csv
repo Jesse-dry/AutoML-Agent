@@ -1,0 +1,6 @@
+iteration,proposed,added,skipped,metrics_delta,added_cols
+1,4,4,0,"RMSE:-1.9486, MAE:-1.6992, MAPE:-1.0290, R2:+0.0524, best_iteration:+9.0000, n_train:-35.0000, n_val:-35.0000","LOAD_lag_12, temp_multiply_LOAD, LOAD_rolling_36_mean, LOAD_rolling_36_std"
+2,4,4,0,"RMSE:-0.3468, MAE:-0.0503, MAPE:-0.0792, R2:+0.0174, best_iteration:-8.0000, n_train:+0.0000, n_val:+0.0000","temp_lag_6, LOAD_rolling_12_mean, temp_div_LOAD, temp_minus_temp_lag_24"
+3,3,2,0,"RMSE:-0.2163, MAE:-0.3556, MAPE:-0.2607, R2:+0.0104, best_iteration:+2.0000, n_train:+0.0000, n_val:+0.0000","temp_lag_24_rolling_24_mean, temp_div_LOAD_lag_12"
+4,4,2,0,"RMSE:+0.3264, MAE:+0.5849, MAPE:+0.4133, R2:-0.0158, best_iteration:-4.0000, n_train:+0.0000, n_val:+0.0000","temp_lag_3, temp_multiply_LOAD_lag_12"
+5,4,2,0,"RMSE:-0.5765, MAE:-0.6545, MAPE:-0.5174, R2:+0.0273, best_iteration:+9.0000, n_train:+0.0000, n_val:+0.0000","temp_div_temp_lag_24, temp_multiply_temp_lag_24"

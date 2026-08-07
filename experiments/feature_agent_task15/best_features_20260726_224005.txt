@@ -1,0 +1,21 @@
+# 最优特征集 (Task 15, iteration 0)
+# Val RMSE: 8.5108
+# 总特征数: 17
+
+hour
+weekday
+month
+is_weekend
+lag_1
+lag_24
+lag_168
+temp
+temp_lag_24
+temp_mean
+temp_min
+temp_max
+temp_std
+rolling_mean_24_load
+rolling_std_24_load
+rolling_mean_168_load
+rolling_mean_24_temp
