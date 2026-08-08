@@ -89,11 +89,22 @@ LLM 驱动的 AutoML Agent —— 面向短期电力负荷预测的**自动化�
 ```
 AutoML-Agent/
 ├── data/
-│   └── preprocessing.py                 # 数据预处理流水线
+│   ├── preprocessing.py                 # 数据预处理流水线（时间戳消歧 / 填充 / 切分 / 基线特征）
+│   ├── gefcom_loader.py                 # GEFCom 统一加载器（train/benchmark/solution + 真值解析）
+│   ├── availability.py                  # 每个 Task 的「可用历史 + 预测区间」定义
+│   └── task_builder.py                  # 血缘式特征规格 + 严格过去向特征构造 + GEFComTask
+│
+├── evaluation/                          # 无泄漏滚动回放评测体系
+│   ├── forecast_protocol.py             # 评测协议（online_h1 / recursive_month_ahead）
+│   ├── leakage_checker.py               # 严格值级泄漏检查（fast/sample/full 分级）
+│   ├── rolling_backtest.py              # 逐小时滚动回测（按协议回填）
+│   ├── evaluator.py                     # 指标计算 + 多 Task 汇总（复用 utils/metrics）
+│   └── task_replay.py                   # Task 1–15 回放主循环 + 审计输出（predictions/run_manifest）
 │
 ├── models/
 │   ├── baseline/
-│   │   └── lgb_gefcom2014.py            # LightGBM 基线（产出特征重要性供 Agent 使用）
+│   │   └── lgb_gefcom2014.py            # LightGBM 基线（legacy 协议，产出特征重要性供 Agent 使用）
+│   ├── replay_backends.py               # 回放模型后端（LightGBM / Seasonal Naive 24/168 / Persistence）
 │   ├── LSTM/
 │   │   └── LSTM_baseline.py             # LSTM 基线（滑动窗口 + 归一化 + 早停）
 │   ├── PatchTST/
@@ -114,8 +125,13 @@ AutoML-Agent/
 │   └── report_agent.py                  # (TODO) 报告生成 Agent
 │
 ├── experiments/
-│   ├── run_feature_agent.py             # 端到端特征工程实验脚本（CLI）
-│   └── feature_agent_task15/            # Task 15 实验输出
+│   ├── run_feature_agent.py             # LLM 特征工程实验脚本（CLI）
+│   ├── run_task_replay.py               # Task 1–15 无泄漏滚动回放评测（CLI）
+│   ├── feature_agent_task15/            # Task 15 LLM 特征工程实验输出
+│   └── output/                          # 回放评测输出（predictions / manifest，gitignored）
+│
+├── tests/
+│   └── test_evaluation_suite.py         # 评测体系自动测试（T1–T6：边界/毒化/信息策略/parity/基线对账）
 │
 └── GEFCom2014-L_V2/                     # 数据集 (gitignored)
 ```
