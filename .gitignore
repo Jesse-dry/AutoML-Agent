@@ -14,6 +14,7 @@ models/*/output/
 
 # 数据
 GEFCom2014-L_V2/
+GEFCom2014 Data/
 
 # 数据预处理笔记
 data/README_preprocessing.md
