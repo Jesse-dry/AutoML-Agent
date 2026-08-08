@@ -26,3 +26,6 @@ data/README_preprocessing.md
 # 环境变量 / API Key（绝对不能推送）
 .env
 .env.local
+
+# Claude Code 本地项目记忆（仅限本地，不推送）
+CLAUDE.md
