@@ -10,7 +10,7 @@ GEFCom2014-L_V2 电力负荷数据预处理模块
 
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List
 import warnings
@@ -207,10 +207,10 @@ def parse_timestamp_with_context(
 def parse_solution_timestamp(date_str: str, hour: int) -> datetime:
     """
     解析 Solution 文件的日期格式: MM/DD/YYYY + hour
-    例: 12/1/2011, 1 → 2011-12-01 01:00
+    例: 12/1/2011, 1 → 2011-12-01 01:00；hour=24 → 次日 00:00
     """
     month, day, year = map(int, date_str.split("/"))
-    return datetime(year, month, day, hour)
+    return datetime(year, month, day, 0) + timedelta(hours=hour)
 
 
 # ============================================================
@@ -388,13 +388,15 @@ def load_single_task(train_path: str, benchmark_path: str = None) -> pd.DataFram
     # 设置时间索引
     df = df.set_index("datetime").sort_index()
 
-    # 将 LOAD 转为数值（空字符串 → NaN）
-    df["LOAD"] = pd.to_numeric(df["LOAD"], errors="coerce")
+    # 将 LOAD 转为数值（空字符串 → NaN）；benchmark 文件无 LOAD 列
+    if "LOAD" in df.columns:
+        df["LOAD"] = pd.to_numeric(df["LOAD"], errors="coerce")
 
-    # 将 w1~w25 转为数值
+    # 将 w1~w25 转为数值；benchmark 文件无 w 列
     w_cols = [f"w{i}" for i in range(1, 26)]
     for c in w_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
     # 删除原始的 ZONEID 和 TIMESTAMP 列（保留 ZONEID 用于分组）
     if "TIMESTAMP" in df.columns:
@@ -644,13 +646,13 @@ def build_baseline_features(df: pd.DataFrame) -> pd.DataFrame:
     df["temp_max"] = df[w_cols].max(axis=1)
     df["temp_std"] = df[w_cols].std(axis=1)
 
-    # ---- 5.4 负荷滚动统计 ----
-    df["rolling_mean_24_load"] = df["LOAD"].rolling(window=24, min_periods=1).mean()
-    df["rolling_std_24_load"] = df["LOAD"].rolling(window=24, min_periods=1).std()
-    df["rolling_mean_168_load"] = df["LOAD"].rolling(window=168, min_periods=1).mean()
+    # ---- 5.4 负荷滚动统计（严格过去窗口：先 shift(1) 再 rolling，不含当前行，防目标自泄露）----
+    df["rolling_mean_24_load"] = df["LOAD"].shift(1).rolling(window=24, min_periods=24).mean()
+    df["rolling_std_24_load"] = df["LOAD"].shift(1).rolling(window=24, min_periods=24).std()
+    df["rolling_mean_168_load"] = df["LOAD"].shift(1).rolling(window=168, min_periods=168).mean()
 
-    # ---- 5.5 温度滚动统计 ----
-    df["rolling_mean_24_temp"] = df["temp_mean"].rolling(window=24, min_periods=1).mean()
+    # ---- 5.5 温度滚动统计（温度外生，但保持一致的严格过去窗口语义）----
+    df["rolling_mean_24_temp"] = df["temp_mean"].shift(1).rolling(window=24, min_periods=24).mean()
 
     # ---- 清理：删除因 shift/rolling 产生的 NaN 行（可选）----
     # 注意：lag_168 会导致前168行为 NaN，根据需求决定是否 drop
