@@ -12,6 +12,9 @@ models/*/output/
 *.pt
 *.pth
 
+# 回放评测运行产出
+experiments/output/
+
 # 数据
 GEFCom2014-L_V2/
 GEFCom2014 Data/

@@ -197,7 +197,28 @@ python models/PatchTST/patch_tst_baseline.py --task 15 --max-epochs 200 --patien
 
 > 所有模型输出统一格式的 `metrics.json`（由 `utils/metrics.py` 的 `compute_all_metrics()` 保证），可直接横向对比。
 
-### 3. 运行 LLM 特征工程实验
+### 3. Task 1–15 无泄漏滚动回放评测
+
+```bash
+# 全量 1:15 回放（LightGBM / 基线 / persistence）
+python experiments/run_task_replay.py --tasks 1:15 --model lightgbm --protocol online_h1
+python experiments/run_task_replay.py --tasks 1:15 --model seasonal_naive_all
+python experiments/run_task_replay.py --tasks 1:15 --model persistence
+# 指定任务 / 快速泄漏检查
+python experiments/run_task_replay.py --tasks 1:3 --model lightgbm --leak-check fast
+```
+
+产出（`experiments/output/task_replay/`）：
+- 逐 Task RMSE 表 + **Mean / Std / Worst RMSE**
+- `predictions/task_{01..15}.csv` — 逐小时 `y_true / y_pred / error`
+- `run_manifest.json` — 协议 / 特征血缘哈希 / seed / git_commit 审计
+
+> **协议说明**：`online_h1`（operational one-hour-ahead）预测 t 时只用 ≤t-1 的真实负荷，
+> 适用于短期滚动预测 Agent，**不复现 GEFCom 官方 month-ahead 信息条件**；
+> `recursive_month_ahead` 为 month-ahead 近似，预测月内只用预测值回填。
+> 二者共享同一无泄漏特征工程（lag/rolling 严格过去窗口，训练/预测特征空间一致）。
+
+### 4. 运行 LLM 特征工程实验
 
 ```bash
 # 真实 LLM 调用
@@ -213,7 +234,7 @@ python experiments/run_feature_agent.py --task 15 --max-iter 3 --dry-run
 - `best_features_*.txt` — 最优迭代使用的完整特征列表
 - `metrics_curve_*.png` — RMSE/MAE/MAPE 三面板迭代曲线图
 
-### 4. 编程方式调用
+### 5. 编程方式调用
 
 ```python
 from agent.feature_agent import run
@@ -347,7 +368,11 @@ df_new, added_cols, skipped = execute_features_from_llm(df, validated)
 
 ---
 
-## 基线结果 (Task 15)
+## 基线结果 (Task 15) — Legacy 协议
+
+> ⚠️ 下列结果来自**旧评测协议**（训练月内部 70/15/15 顺序切分 + rolling 特征含当前行的自泄露），
+> 属于项目历史，**不可与新的无泄漏 Task 1–15 滚动回放结果直接对比**。新评测体系见上方
+> 「Task 1–15 无泄漏滚动回放评测」。
 
 | 模型 | Train RMSE | Train MAPE | Val RMSE | Val MAPE | Test RMSE | Test MAPE | 参数量 |
 |------|-----------|------------|----------|----------|-----------|-----------|--------|
