@@ -14,6 +14,7 @@ import pandas as pd
 from data.gefcom_loader import GEFCOM_DATA_DIR
 from data.task_builder import (
     TARGET_COL,
+    FEATURE_SPEC,
     build_task,
     feature_spec_hash,
 )
@@ -28,8 +29,13 @@ class LeakageError(RuntimeError):
     """泄漏检查未通过，中止回放。"""
 
 
-def _check_task_leakage(task, leak_check: str, protocol: ForecastProtocol) -> None:
-    """对历史段（+ 预测窗口，非 recursive 时）做严格泄漏检查，违规即中止。"""
+def _check_task_leakage(task, leak_check: str, protocol: ForecastProtocol,
+                        spec: List[dict] = FEATURE_SPEC) -> None:
+    """对历史段（+ 预测窗口，非 recursive 时）做严格泄漏检查，违规即中止。
+
+    spec 透传：候选特征集（含 lag/rolling/cross）必须与默认 FEATURE_SPEC
+    走同一套 Pass A 血缘静态检查 + Pass B recompute，不能绕过。
+    """
     extra_points = [
         task.train_df.index[-1],
         task.val_df.index[0],
@@ -39,7 +45,7 @@ def _check_task_leakage(task, leak_check: str, protocol: ForecastProtocol) -> No
 
     # 历史段（含全部特征 + 目标）
     ok_hist, v_hist = check_feature_leakage(
-        task.history_df, mode=leak_check, extra_check_points=extra_points
+        task.history_df, spec=spec, mode=leak_check, extra_check_points=extra_points
     )
     if not ok_hist:
         _raise_leakage("历史段", v_hist)
@@ -47,14 +53,14 @@ def _check_task_leakage(task, leak_check: str, protocol: ForecastProtocol) -> No
     if not protocol.recursive:
         # 预测窗口段：必须拼接完整历史上下文，否则月首 lag/rolling 的
         # 历史前缀缺失会导致 Pass B 误报。拼接后 Pass B 在完整序列上重算，
-        # 与已构建特征逐位一致（T5 parity）。
+        # 与已构建特征逐位一致（T5 parity）。spec 须按序含 cross 操作列。
         observed_full = pd.concat([task.history_df[TARGET_COL], task.y_true])
-        fw_feat = build_forecast_features(observed_full, task.forecast_ts)
+        fw_feat = build_forecast_features(observed_full, task.forecast_ts, spec=spec)
         full_check = pd.concat([task.history_df, fw_feat])
         full_check[TARGET_COL] = observed_full.values
         extra_fw = [task.forecast_ts[0], task.forecast_ts[-1]]
         ok_fw, v_fw = check_feature_leakage(
-            full_check, mode=leak_check, extra_check_points=extra_fw
+            full_check, spec=spec, mode=leak_check, extra_check_points=extra_fw
         )
         if not ok_fw:
             _raise_leakage("预测窗口段", v_fw)
@@ -100,7 +106,7 @@ def replay(
     for tid in sorted(task_ids):
         task = build_task(tid, data_dir, val_hours, spec=spec)
         if not skip_leak_check:
-            _check_task_leakage(task, leak_check, protocol)
+            _check_task_leakage(task, leak_check, protocol, spec)
         backend.fit(task.train_df, task.val_df, task.feature_cols, task.target_col, seed)
         y_pred = rolling_predict(backend, task, protocol, spec=spec)
         results.append(evaluate_task(task, y_pred, backend.name, protocol.name))

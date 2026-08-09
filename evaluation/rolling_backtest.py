@@ -16,7 +16,13 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
-from data.task_builder import TARGET_COL, FEATURE_SPEC, GEFComTask, build_features
+from data.task_builder import (
+    TARGET_COL,
+    FEATURE_SPEC,
+    GEFComTask,
+    _CROSS_OPS,
+    build_features,
+)
 from evaluation.forecast_protocol import ONLINE_H1, ForecastProtocol
 from models.replay_backends import ModelBackend
 
@@ -42,7 +48,9 @@ def _features_at(
 ) -> Dict[str, float]:
     """
     单点特征计算（recursive 协议用）。与 build_features 在相同输入下
-    逐位一致：lag = observed[t-k]，rolling = mean/std(observed[t-w..t-1])。
+    逐位一致：lag = observed[t-k]；rolling = stat(observed[t-w..t-1])，
+    非空点不足 min_periods 时为 NaN（与 pandas rolling 语义一致）；
+    cross = 操作列在 spec 中先定义，逐点复用已算值。
     """
     row: Dict[str, float] = {}
     for s in spec:
@@ -62,13 +70,16 @@ def _features_at(
             row[name] = observed.get(t - _HOUR * s["k"], np.nan)
         elif stype == "rolling":
             w = s["window"]
-            vals = observed.loc[t - _HOUR * w : t - _HOUR]
-            if s["stat"] == "mean":
-                row[name] = vals.mean()
-            elif s["stat"] == "std":
-                row[name] = vals.std()
+            min_periods = s.get("min_periods", w)
+            vals = observed.loc[t - _HOUR * w : t - _HOUR].dropna()
+            if len(vals) < min_periods:
+                row[name] = np.nan
             else:
-                raise ValueError(f"未知 rolling 统计量: {s['stat']}")
+                row[name] = getattr(vals, s["stat"])()
+        elif stype == "cross":
+            row[name] = _CROSS_OPS[s["operation"]](
+                row[s["col1"]], row[s["col2"]]
+            )
         else:
             raise ValueError(f"未知特征类型: {stype}")
     return row

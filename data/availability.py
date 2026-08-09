@@ -64,6 +64,8 @@ def available_history(
     """
     if task_id not in TASK_IDS:
         raise ValueError(f"task_id 必须在 1..15，got {task_id}")
+    if data_dir is None:
+        data_dir = GEFCOM_DATA_DIR  # 调用方透传 None 时兜底
 
     frames: List[pd.DataFrame] = [
         load_train(k, data_dir) for k in range(1, task_id + 1)

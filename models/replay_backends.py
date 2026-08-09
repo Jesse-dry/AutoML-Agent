@@ -10,7 +10,7 @@
 #   - PersistenceBackend     y_hat[t] = y[t-1]（= seasonal naive 1）
 # ---------------------------------------------------------------
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 import lightgbm as lgb
 import numpy as np
@@ -34,6 +34,13 @@ class ModelBackend(ABC):
 
     @abstractmethod
     def predict(self, X: pd.DataFrame) -> np.ndarray: ...
+
+    def feature_importance(self) -> Optional[pd.DataFrame]:
+        """可选：特征重要性（gain）。默认 None（naive/persistence 不实现）。
+
+        runner 检测到 None 时跳过特征重要性上下文段。
+        """
+        return None
 
 
 class LightGBMBackend(ModelBackend):
@@ -96,7 +103,19 @@ class LightGBMBackend(ModelBackend):
             ],
         )
         self.best_iteration = self._model.best_iteration
+
+        # 特征重要性（gain），供自进化 runner 构建上下文
+        imp = self._model.feature_importance(importance_type="gain")
+        total = float(imp.sum())
+        self._importance = pd.DataFrame({
+            "feature": self._feature_cols,
+            "importance_gain": imp,
+            "importance_gain_norm": (imp / total * 100 if total > 0 else 0),
+        }).sort_values("importance_gain", ascending=False).reset_index(drop=True)
         return self
+
+    def feature_importance(self) -> Optional[pd.DataFrame]:
+        return getattr(self, "_importance", None)
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         return self._model.predict(X[self._feature_cols])

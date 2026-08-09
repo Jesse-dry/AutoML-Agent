@@ -15,6 +15,9 @@ models/*/output/
 # 回放评测运行产出
 experiments/output/
 
+# 经验记忆运行时数据（源码 memory/memory_manager.py 仍入库）
+memory/experiment_memory.jsonl
+
 # 数据
 GEFCom2014-L_V2/
 GEFCom2014 Data/
@@ -33,3 +36,6 @@ data/README_preprocessing.md
 
 # Claude Code 本地项目记忆（仅限本地，不推送）
 CLAUDE.md
+
+# 答辩材料 / 本地讲解文档（docs/ 整目录仅本地，不推送）
+docs/

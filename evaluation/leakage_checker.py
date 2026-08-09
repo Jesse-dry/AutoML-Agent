@@ -87,6 +87,28 @@ def _pass_a(spec: List[dict], feature_cols: List[str], target_col: str,
                     name, None, "incomplete_window",
                     f"rolling {name} min_periods={min_periods} < window={window}，"
                     f"窗口不完整（Feature completeness 违规，非泄漏）"))
+        elif stype == "cross":
+            col1, col2 = s.get("col1"), s.get("col2")
+            if col1 == target_col or col2 == target_col:
+                violations.append(LeakageViolation(
+                    name, None, "cross_uses_target",
+                    f"cross {name} 操作列含当前目标（{col1}/{col2}），必须用滞后/滚动特征"))
+            name_set = set(feature_cols)
+            if col1 not in name_set or col2 not in name_set:
+                violations.append(LeakageViolation(
+                    name, None, "cross_unknown_operand",
+                    f"cross {name} 操作列 {col1}/{col2} 不在特征集合中"))
+            if s.get("uses_current_target", False):
+                violations.append(LeakageViolation(
+                    name, None, "cross_uses_current",
+                    f"cross {name} uses_current_target=True，操作含当前目标"))
+            # 操作列顺序必须在 cross 自身之前（增量计算依赖）
+            idx = {f: i for i, f in enumerate(feature_cols)}
+            pos = idx.get(name, len(feature_cols))
+            if (col1 in idx and idx[col1] >= pos) or (col2 in idx and idx[col2] >= pos):
+                violations.append(LeakageViolation(
+                    name, None, "cross_operand_order",
+                    f"cross {name} 操作列 {col1}/{col2} 必须定义在自身之前"))
         elif stype == "time":
             pass
     # 目标别名
