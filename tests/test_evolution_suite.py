@@ -39,7 +39,12 @@ from evaluation.leakage_checker import check_feature_leakage
 from evaluation.rolling_backtest import _features_at, build_forecast_features
 from evaluation.spec_evaluator import evaluate_spec
 from evaluation.task_replay import LeakageError, replay
-from memory.memory_manager import MemoryManager, Scenario, ExperienceRecord
+from memory.memory_manager import (
+    MemoryManager,
+    Scenario,
+    StrategyRecord,
+    ExperienceRecord,
+)
 from models.replay_backends import PersistenceBackend
 
 _FAILED = []
@@ -352,6 +357,28 @@ def test_e8_memory_roundtrip():
         winter = mm.retrieve(Scenario("winter", 0.31, 0.21, 0.49), top_k=1)
         check("E8 检索冬季", len(winter) == 1 and winter[0].task_id == 6)
 
+        # 策略级记忆（P1-B）：往返 + 场景相似度检索
+        sr1 = StrategyRecord(task_id=1, spec=snapshot(FEATURE_SPEC), rmse=4.5,
+                             scenario=Scenario("summer", 0.90, 0.80, 0.20),
+                             stats={"mean": 100.0}, policy="cold_start",
+                             init_max_iter=5, transfer_gap=None)
+        sr2 = StrategyRecord(task_id=6, spec=snapshot(FEATURE_SPEC), rmse=3.9,
+                             scenario=Scenario("winter", 0.30, 0.20, 0.50),
+                             stats={"mean": 80.0}, policy="inherit",
+                             init_max_iter=2, transfer_gap=0.12)
+        mm.record_strategy(sr1)
+        mm.record_strategy(sr2)
+        check("E8 策略落盘", mm.strategies_path.exists()
+              and len(mm.load_strategies()) == 2)
+        loaded = mm.load_strategies()[0]
+        check("E8 策略往返字段", loaded.spec == sr1.spec and loaded.rmse == sr1.rmse
+              and loaded.scenario.season == "summer" and loaded.policy == "cold_start"
+              and loaded.transfer_gap is None)
+        near_s = mm.retrieve_strategies(Scenario("summer", 0.89, 0.81, 0.21), top_k=1)
+        check("E8 策略检索近场景", len(near_s) == 1 and near_s[0].task_id == 1)
+        winter_s = mm.retrieve_strategies(Scenario("winter", 0.31, 0.21, 0.49), top_k=1)
+        check("E8 策略检索冬季", len(winter_s) == 1 and winter_s[0].task_id == 6)
+
 
 # ---------------- E9 ----------------
 def test_e9_error_profiler():
@@ -436,6 +463,23 @@ def test_e12_runner_end_to_end():
         check("E12 result 字段齐全", "baseline_rmse" in result and "best_spec" in result
               and "summary" in result)
 
+        # warm-start（P1-B）：init_spec 作为 Round 0 基线，
+        # baseline_rmse == init_spec 在该 Task 的 RMSE（跨 Task 迁移的 transfer-gap 基础）
+        init_spec = snapshot(FEATURE_SPEC) + [
+            {"name": "lag_48", "type": "lag", "source": "LOAD", "k": 48,
+             "lookback_start": -48, "lookback_end": -48, "uses_current_target": False}]
+        runner_ws = EvolutionRunner(
+            task_id=2, spec_evaluator=_mock_eval(rules), llm_client=ScriptedLLM(script),
+            max_iter=1, init_spec=init_spec, init_spec_label="Task 1 best",
+        )
+        res_ws = runner_ws.run(verbose=False)
+        check("E12 warm-start 基线=继承策略",
+              abs(res_ws["baseline_rmse"] - 5.7) < 1e-9
+              and res_ws["summary"][0]["note"] == "baseline Task 1 best",
+              f"baseline={res_ws['baseline_rmse']:.4f} note={res_ws['summary'][0]['note']}")
+        check("E12 warm-start baseline_spec==init_spec",
+              res_ws["baseline_spec"] == init_spec)
+
 
 # ---------------- E13 ----------------
 def test_e13_cli_smoke():
@@ -451,12 +495,222 @@ def test_e13_cli_smoke():
         ]
         env = dict(os.environ, PYTHONIOENCODING="utf-8")
         proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True,
-                              text=True, timeout=180, env=env)
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=180, env=env)
         check("E13 CLI 返回码 0", proc.returncode == 0,
               f"rc={proc.returncode}\n{proc.stderr[-500:]}")
         check("E13 CLI 产物", outdir.exists()
               and (outdir / "run_manifest.json").exists()
               and (outdir / "best_features.txt").exists())
+
+
+# ---------------- E14 ----------------
+def test_e14_drift_detector():
+    from data.availability import available_history
+    from evaluation.drift_detector import (
+        compute_task_stats,
+        detect_drift,
+        format_drift_for_llm,
+    )
+
+    def _mk(level, amp24, amp168, noise, seed=0):
+        n = 1000
+        t = np.arange(n)
+        y = (level + amp24 * np.sin(2 * np.pi * t / 24)
+             + amp168 * np.sin(2 * np.pi * t / 168)
+             + np.random.RandomState(seed).randn(n) * noise)
+        return pd.DataFrame(
+            {"LOAD": y}, index=pd.date_range("2020-01-01", periods=n, freq="h")
+        )
+
+    A = _mk(100, 20, 8, 3)
+    B = _mk(180, 20, 8, 3)      # 均值 +80（>2σ 池）
+    C = _mk(100, 40, 16, 6)     # 波动倍增（std ≈ 2×）
+    D = _mk(100, 20, 8, 40)     # 噪声淹没 → ACF 削弱
+    sA, sB, sC, sD = (compute_task_stats(x, task_id=i)
+                      for i, x in enumerate([A, B, C, D], 1))
+
+    r_self = detect_drift(sA, sA)
+    check("E14 自对比 score=0", r_self.drift_score == 0.0 and r_self.level == "low")
+
+    r_ab = detect_drift(sA, sB)
+    check("E14 均值漂移信号>0.5", r_ab.signals["mean_shift"] > 0.5,
+          f"={r_ab.signals['mean_shift']:.2f}")
+    check("E14 均值漂移 medium+", r_ab.level in ("medium", "high"),
+          f"={r_ab.level} score={r_ab.drift_score:.2f}")
+
+    r_ac = detect_drift(sA, sC)
+    check("E14 波动倍增 std_shift>0.3", r_ac.signals["std_shift"] > 0.3,
+          f"={r_ac.signals['std_shift']:.2f}")
+    check("E14 波动倍增 medium", r_ac.level == "medium",
+          f"={r_ac.level} score={r_ac.drift_score:.2f}")
+
+    r_ad = detect_drift(sA, sD)
+    check("E14 ACF 削弱 → high", r_ad.signals["acf24_change"] > 0.3 and r_ad.level == "high",
+          f"acf24={r_ad.signals['acf24_change']:.2f} lvl={r_ad.level}")
+
+    # 残余恶化（transfer-gap）应抬升 drift_score 并计入 scores
+    r_abr = detect_drift(sA, sB, resid_trend=0.8)
+    check("E14 残余恶化抬升 score", r_abr.drift_score > r_ab.drift_score
+          and "residual" in r_abr.scores,
+          f"{r_ab.drift_score:.2f}->{r_abr.drift_score:.2f}")
+
+    txt = format_drift_for_llm(r_ab)
+    check("E14 format 含字段", "drift_score" in txt and "mean_shift" in txt)
+
+    # 真实数据：Task 1 vs 15（相隔一年、跨季节）→ medium+；自对比 → 0
+    s1 = compute_task_stats(available_history(1).history_df, task_id=1)
+    s15 = compute_task_stats(available_history(15).history_df, task_id=15)
+    r_real = detect_drift(s1, s15)
+    check("E14 真实 T1->T15 medium+", r_real.level in ("medium", "high")
+          and r_real.drift_score > 0.2,
+          f"={r_real.drift_score:.2f} {r_real.level}")
+
+
+# ---------------- E15 ----------------
+def test_e15_migration_decision():
+    from agent.strategy_migration import (
+        MigrationPlanner,
+        build_migration_messages,
+        cold_start_decision,
+        default_decision,
+        parse_migration_v2,
+        resolve_init_spec,
+    )
+    from evaluation.drift_detector import DriftReport
+
+    # ---- parse_migration_v2 ----
+    good = parse_migration_v2({
+        "task_id": 5, "analysis": "a",
+        "decision": {"policy": "modify", "rationale": "mean_shift 高", "max_iter": 6},
+    }, expected_task_id=5)
+    check("E15 解析合法", good["policy"] == "modify" and good["max_iter"] == 6)
+    for bad, name in [
+        ({"task_id": 5, "analysis": "a", "decision": {"policy": "nope", "rationale": "x"}},
+         "非法 policy 拒"),
+        ({"task_id": 5, "analysis": "a", "decision": {"policy": "reset"}}, "缺 rationale 拒"),
+        ({"task_id": 5, "analysis": "a",
+          "decision": {"policy": "reset", "rationale": "x", "max_iter": 99}}, "max_iter 越界拒"),
+    ]:
+        try:
+            parse_migration_v2(bad)
+            check(f"E15 {name}", False)
+        except ValueError:
+            check(f"E15 {name}", True)
+    try:
+        parse_migration_v2({"task_id": 4, "analysis": "a",
+                            "decision": {"policy": "reset", "rationale": "x"}},
+                           expected_task_id=5)
+        check("E15 task_id 不匹配拒", False)
+    except ValueError:
+        check("E15 task_id 不匹配拒", True)
+
+    # ---- 确定性映射 ----
+    prev_spec = snapshot(FEATURE_SPEC) + [{
+        "name": "lag_48", "type": "lag", "source": "LOAD", "k": 48,
+        "lookback_start": -48, "lookback_end": -48, "uses_current_target": False}]
+    prev = StrategyRecord(task_id=4, spec=prev_spec, rmse=4.0,
+                          scenario=Scenario("summer", 0.90, 0.80, 0.20))
+    d_low = default_decision(5, "low", prev)
+    check("E15 low→inherit 继承 prev", d_low.policy == "inherit" and d_low.max_iter == 2
+          and d_low.init_spec == prev_spec, f"init={len(d_low.init_spec)}")
+    d_med = default_decision(5, "medium", prev)
+    check("E15 medium→modify", d_med.policy == "modify" and d_med.max_iter == 5
+          and d_med.init_spec == prev_spec)
+    d_hi = default_decision(5, "high", prev)
+    check("E15 high→reset", d_hi.policy == "reset" and d_hi.max_iter == 8
+          and d_hi.init_spec == snapshot(FEATURE_SPEC))
+    d_cold = cold_start_decision(1)
+    check("E15 冷启动 reset", d_cold.policy == "reset"
+          and d_cold.init_spec == snapshot(FEATURE_SPEC) and d_cold.max_iter == 5)
+
+    # ---- resolve_init_spec：泄漏回退 / 合法保留 ----
+    leaky = snapshot(FEATURE_SPEC) + [{
+        "name": "lag_0", "type": "lag", "source": "LOAD", "k": 0,
+        "lookback_start": 0, "lookback_end": 0, "uses_current_target": False}]
+    check("E15 泄漏 init_spec 回退", resolve_init_spec(leaky) == snapshot(FEATURE_SPEC))
+    check("E15 合法 init_spec 保留", resolve_init_spec(prev_spec) == prev_spec)
+
+    # ---- MigrationPlanner：LLM 路径 + 确定性兜底 + 冷启动 ----
+    drift = DriftReport(task_id=5, compared_task_id=4, drift_score=0.70, level="high",
+                        signals={"mean_shift": 0.5}, residual={},
+                        scores={"data": 0.5}, meta={})
+    script_llm = ScriptedLLM(lambda _: json.dumps({
+        "task_id": 5, "analysis": "漂移大",
+        "decision": {"policy": "reset", "rationale": "std_shift 高，重新搜索", "max_iter": 8},
+    }, ensure_ascii=False))
+    dec_llm = MigrationPlanner(llm_client=script_llm).plan(
+        5, drift=drift, prev_strategy=prev, scenario=prev.scenario)
+    check("E15 LLM 决策 reset", dec_llm.policy == "reset" and dec_llm.source == "llm"
+          and dec_llm.max_iter == 8 and dec_llm.init_spec == snapshot(FEATURE_SPEC))
+    dec_det = MigrationPlanner().plan(5, drift=drift, prev_strategy=prev)
+    check("E15 确定性兜底", dec_det.source == "deterministic" and dec_det.policy == "reset")
+    dec_cold = MigrationPlanner().plan(1)
+    check("E15 planner 冷启动", dec_cold.policy == "reset" and dec_cold.max_iter == 5)
+
+    # ---- prompt 渲染 ----
+    msgs = build_migration_messages(5, drift, prev)
+    check("E15 messages 含 drift 文本", "drift_score" in msgs[-1]["content"]
+          and "上一 Task 最佳策略" in msgs[-1]["content"])
+
+
+# ---------------- E16 ----------------
+def test_e16_outer_loop_cli():
+    with tempfile.TemporaryDirectory() as tmp:
+        outdir = Path(tmp) / "outer"
+        memfile = Path(tmp) / "mem.jsonl"
+        cmd = [
+            sys.executable,
+            str(PROJECT_ROOT / "experiments" / "run_outer_loop.py"),
+            "--tasks", "1:3", "--model", "persistence", "--dry-run",
+            "--n-candidates", "2", "--outdir", str(outdir),
+            "--memory-file", str(memfile), "--quiet",
+        ]
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=300, env=env)
+        check("E16 CLI 返回码 0", proc.returncode == 0,
+              f"rc={proc.returncode}\n{proc.stdout[-800:]}\n{proc.stderr[-800:]}")
+
+        # 策略落盘 3 条（strategies.jsonl 与记忆文件同目录）
+        from memory.memory_manager import MemoryManager
+        mm = MemoryManager(memfile)
+        recs = mm.load_strategies()
+        check("E16 策略落盘 3 条", len(recs) == 3 and mm.strategies_path.exists(),
+              f"len={len(recs)}")
+
+        # 逐 Task 审计产物
+        check("E16 审计产物",
+              (outdir / "task_01" / "decision.json").exists()
+              and (outdir / "task_01" / "strategy.json").exists()
+              and (outdir / "task_02" / "drift_report.json").exists()
+              and (outdir / "task_03" / "summary.json").exists()
+              and (outdir / "outer_loop_summary.csv").exists())
+
+        # 冷启动 Task1 drift=null；Task2/3 有漂移报告
+        d1 = json.loads((outdir / "task_01" / "drift_report.json").read_text(encoding="utf-8"))
+        d2 = json.loads((outdir / "task_02" / "drift_report.json").read_text(encoding="utf-8"))
+        d3 = json.loads((outdir / "task_03" / "drift_report.json").read_text(encoding="utf-8"))
+        check("E16 冷启动 drift=null", d1 is None)
+        check("E16 Task2/3 drift 有效",
+              d2 is not None and d2["level"] in ("low", "medium", "high")
+              and d3 is not None and d3["level"] in ("low", "medium", "high"))
+
+        # 继承链：Task2 的 decision.init_spec == Task1 的 best spec
+        s1 = json.loads((outdir / "task_01" / "strategy.json").read_text(encoding="utf-8"))
+        dec2 = json.loads((outdir / "task_02" / "decision.json").read_text(encoding="utf-8"))
+        t1_names = {s["name"] for s in s1["spec"]}
+        check("E16 Task2 继承 Task1 特征集",
+              set(dec2["init_feature_names"]) == t1_names
+              and dec2["policy"] in ("inherit", "modify", "reset"),
+              f"policy={dec2['policy']}")
+
+        # 总表 3 行
+        import csv
+        with open(outdir / "outer_loop_summary.csv", encoding="utf-8-sig") as f:
+            n_rows = sum(1 for _ in csv.DictReader(f))
+        check("E16 总表 3 行", n_rows == 3, f"n={n_rows}")
 
 
 def main():
@@ -474,6 +728,9 @@ def main():
     test_e11_pass_a_cross()
     test_e12_runner_end_to_end()
     test_e13_cli_smoke()
+    test_e14_drift_detector()
+    test_e15_migration_decision()
+    test_e16_outer_loop_cli()
     print("=" * 60)
     if _FAILED:
         print(f"FAILED: {_FAILED}")

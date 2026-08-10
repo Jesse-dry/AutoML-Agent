@@ -61,6 +61,8 @@ class EvolutionRunner:
         data_dir=None,
         dataset_name: str = "",
         max_lag: int = 168,
+        init_spec: Optional[List[dict]] = None,
+        init_spec_label: str = "",
     ):
         self.task_id = task_id
         self.backend_factory = backend_factory or (lambda: LightGBMBackend())
@@ -79,10 +81,17 @@ class EvolutionRunner:
         self.dataset_name = dataset_name or f"GEFCom2014 Task {task_id}"
         self.max_lag = int(max_lag)
 
-        # 状态
-        self.baseline_spec: List[dict] = snapshot(FEATURE_SPEC)
-        self.current_spec: List[dict] = snapshot(self.baseline_spec)
-        self.best_spec: List[dict] = snapshot(self.baseline_spec)
+        # 状态（init_spec 提供跨 Task 迁移的 warm-start 起点；
+        # Round 0 评测 init_spec → baseline_rmse = 继承策略在本 Task 的 RMSE）
+        self.init_spec = snapshot(init_spec) if init_spec is not None else None
+        base = self.init_spec if self.init_spec is not None else snapshot(FEATURE_SPEC)
+        self.init_spec_label = (
+            init_spec_label
+            or ("inherited spec" if self.init_spec is not None else "FEATURE_SPEC")
+        )
+        self.baseline_spec: List[dict] = base
+        self.current_spec: List[dict] = snapshot(base)
+        self.best_spec: List[dict] = snapshot(base)
         self.best_rmse: float = float("inf")
         self.baseline_rmse: float = float("inf")
         self.best_round: int = 0
@@ -390,7 +399,7 @@ class EvolutionRunner:
         summary_rows = [{
             "round": 0, "outcome": "baseline", "best_rmse": self.baseline_rmse,
             "delta_rmse": 0.0, "n_features": len(self.baseline_spec),
-            "note": "baseline FEATURE_SPEC",
+            "note": f"baseline {self.init_spec_label}",
         }]
         for r in self.round_records:
             summary_rows.append({

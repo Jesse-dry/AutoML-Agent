@@ -153,8 +153,9 @@ Household Energy Agent
 | 新增模块 | 文件 | 职责 |
 |----------|------|------|
 | Task Replay Engine | `data/gefcom_loader.py` `task_builder.py` `task_replay.py` | Load + Wind 多任务滚动回放 |
-| Drift Detection | `agent/drift_agent.py` | 均值/方差/周期/极端天气/误差漂移检测 |
-| Experience Memory | `memory/feature_memory.json` `scenario_memory.json` `failure_memory.json` | 场景→动作→结果→经验入库 |
+| Drift Detection ✅（Load 版已落地，P1-B） | `evaluation/drift_detector.py` | 尾部窗口均值/方差/分位/ACF 周期/残余误差漂移检测 → score/level（确定性） |
+| Strategy Migration ✅（Load 版已落地，P1-B） | `agent/strategy_migration.py` `experiments/run_outer_loop.py` | 漂移报告 → LLM 决策 继承/修改/重置 → warm-start 自进化 → 策略入库 |
+| Experience Memory | `memory/feature_memory.json` `scenario_memory.json` `failure_memory.json` `memory/experiment_memory.jsonl` `strategies.jsonl` | 场景→动作→结果→经验入库 |
 
 ### V3.0：分场景多能源专家协同（P1 · 第二优先级）
 
@@ -262,12 +263,13 @@ Household Energy Agent
 
 ### P0 —— 论文主线（V2.0）
 
-- [ ] **多任务滚动预测框架** ⭐⭐⭐⭐⭐ `data/gefcom_loader.py` + `task_builder.py` + `task_replay.py`
-  - Task15 only → Load + Wind 跨能源滚动回放
-- [ ] **Experience Memory** ⭐⭐⭐⭐⭐ `memory/feature_memory.json` + `scenario_memory.json` + `failure_memory.json`
-  - 滚动自进化 + 后续跨用户迁移的基础
-- [ ] **Drift Detection** ⭐⭐⭐⭐⭐ `agent/drift_agent.py`
-  - 均值/方差/周期/极端天气/误差漂移 → 双闭环
+- [x] **多任务滚动预测框架（Load 版）** ⭐⭐⭐⭐⭐ `data/gefcom_loader.py` + `task_builder.py` + `task_replay.py`
+  - Task15 only → Load 全 15 Task 无泄漏滚动回放已落地；待扩 Wind
+- [x] **Experience Memory（Load 版）** ⭐⭐⭐⭐⭐ `memory/experiment_memory.jsonl`（轮级）+ `memory/strategies.jsonl`（策略级）
+  - 滚动自进化 + 跨 Task 迁移的基础
+- [x] **Drift Detection + Strategy Migration（Load 版，P1-B）** ⭐⭐⭐⭐⭐ `evaluation/drift_detector.py` + `agent/strategy_migration.py` + `experiments/run_outer_loop.py`
+  - 均值/方差/分位/周期/残余误差漂移 → 继承/修改/重置 → warm-start 双闭环
+  - 待扩：极端天气漂移、Wind 能源切换场景
 
 ### P1 —— 核心创新（V3.0）
 

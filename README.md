@@ -4,6 +4,8 @@ LLM 驱动的 AutoML Agent —— 面向短期电力负荷预测的**自动化�
 
 **核心创新**：大语言模型（LLM）作为**预测建模决策器**，在**受约束动作空间**（ADD / REMOVE / REPLACE / KEEP / ROLLBACK / STOP 六类动作，特征仅允许 lag / rolling / time / cross 四类确定性操作，参数受时间因果性与安全上限约束）内**自主设计与删改特征**。每轮 Agent 在**误差画像**（分段 RMSE + bias）驱动下提出 **3 个不同假设的候选方案**，逐一评测后**择优 / 自动回滚**，并把每次实验写入**经验记忆**（跨 Task 共享，场景相似度检索复用）。所有评测跑在**无泄漏滚动回放**（预测月 online_h1）之上，保证结果可信。LLM 不写代码——基于数据统计、自相关分析（ACF）、特征重要性、误差画像和历史经验，**自主决定**生成 / 删除什么特征；确定性执行引擎负责**安全执行**。两者构成完整的 **感知→决策→执行→评估→反馈→记忆** 闭环。
 
+**外循环（P1-B）**：把自进化 Agent 串联到 Task 1–15 滚动评测上，形成**滚动自适应进化双闭环智能体**——每完成一个 Task 保存**最佳策略 + 经验**，进入下一个 Task 前用**确定性漂移检测**（`evaluation/drift_detector.py`：均值 / 方差 / 分位 / ACF 周期 / 残余误差五类信号）度量 Task 间变化，再由 LLM 决定**继承 / 修改 / 重置**策略（`agent/strategy_migration.py`），以**warm-start**（`EvolutionRunner(init_spec=…)`）+ **自适应迭代预算**开始新一轮内循环。内循环负责"单 Task 自进化"，外循环负责"Task 间自适应迁移"。
+
 数据集：[GEFCom2014-L_V2](https://www.sciencedirect.com/journal/international-journal-of-forecasting/vol/30/issue/2)（Global Energy Forecasting Competition 2014，负荷预测赛道，含 15 个任务）
 
 > **计划扩展**：后续将陆续增加更多电力负荷预测数据集，覆盖不同地区、时间粒度和数据特征，以验证模型和特征工程策略的通用性与鲁棒性。
@@ -56,6 +58,25 @@ LLM 驱动的 AutoML Agent —— 面向短期电力负荷预测的**自动化�
      summary.json / iteration_history.csv / best_features.txt
      error_profile.txt / run_manifest.json
      + memory/experiment_memory.jsonl（跨 Task 经验库）
+              │
+              ▼
+ ┌──────────────────────────────────────────────┐
+ │  外循环（P1-B）：滚动自适应进化双闭环           │
+ │   Task k 完成 → 保存 Best Strategy + 经验      │
+ │   → Task k+1 漂移检测（drift_detector.py）     │
+ │     均值/方差/分位/ACF/残余误差 五类信号        │
+ │   → LLM 策略迁移（strategy_migration.py）      │
+ │     继承(low) / 修改(medium) / 重置(high)      │
+ │   → warm-start EvolutionRunner(init_spec)     │
+ │     + 自适应 max_iter                          │
+ │   → record_strategy → Task k+2 …              │
+ └──────────────────────────────────────────────┘
+             │
+             ▼
+     外循环审计 (experiments/output/outer_loop/)
+     task_{id:02d}/{drift_report, decision, strategy}.json
+     outer_loop_summary.csv（drift / policy / transfer_gap）
+     + memory/strategies.jsonl（每 Task 最佳策略库）
 ```
 
 ---
@@ -77,6 +98,7 @@ AutoML-Agent/
 │   ├── evaluator.py                     # 指标计算 + 多 Task 汇总（复用 utils/metrics）
 │   ├── error_profiler.py                # 误差画像（时段/负荷状态/变化状态分段 + bias + top-worst）
 │   ├── spec_evaluator.py                # 候选特征集评测器（decision metric = 预测月 online_h1）
+│   ├── drift_detector.py                # ★跨 Task 漂移检测（尾部窗口均值/方差/分位/ACF/残余误差 → score/level）
 │   └── task_replay.py                   # Task 1–15 回放主循环 + 审计输出（predictions/run_manifest）
 │
 ├── models/
@@ -100,6 +122,7 @@ AutoML-Agent/
 │   ├── feature_spec.py                  # ★血缘式 spec 工具 + 动作解释器（name/normalize/validate/apply_actions）
 │   ├── evolution_runner.py              # ★自进化闭环状态机（多候选 → Selector 择优/自动回滚 → 记忆）
 │   ├── evolution_schema.py              # ★LLM 输出 v2 schema 解析 + Prompt 构建
+│   ├── strategy_migration.py            # ★跨 Task 策略迁移（LLM 决策 继承/修改/重置 + 确定性兜底）
 │   ├── scripted_llm.py                  # ★确定性 LLM（测试 / --dry-run）
 │   ├── feature_engine.py                # 确定性特征执行引擎（lag/rolling/time/cross）[legacy]
 │   ├── feature_agent.py                 # LLM Agent 协议 + 闭环迭代调度器（v1，仅 ADD）[legacy]
@@ -107,10 +130,11 @@ AutoML-Agent/
 │   └── report_agent.py                  # (TODO) 报告生成 Agent
 │
 ├── memory/
-│   └── memory_manager.py                # ★经验记忆（JSONL + 场景相似度检索，跨 Task 共享）
+│   └── memory_manager.py                # ★经验记忆（experiment_memory.jsonl 轮级经验 + strategies.jsonl 策略级记忆，场景相似度检索跨 Task 共享）
 │
 ├── experiments/
 │   ├── run_self_evolving_agent.py       # ★自进化 Agent 实验（CLI：--task / --max-iter / --dry-run / --n-candidates）
+│   ├── run_outer_loop.py                # ★外循环（P1-B）：逐 Task 漂移检测 → 策略迁移 → warm-start 自进化（CLI）
 │   ├── run_task_replay.py               # Task 1–15 无泄漏滚动回放评测（CLI）
 │   ├── run_feature_agent.py             # v1 特征工程 Agent 实验（legacy）
 │   ├── feature_agent_task15/            # Task 15 v1 实验输出
@@ -118,7 +142,7 @@ AutoML-Agent/
 │
 ├── tests/
 │   ├── test_evaluation_suite.py         # 评测体系测试（T1–T6）
-│   └── test_evolution_suite.py          # ★自进化 Agent 测试（E1–E13，E6 复现回滚完成标准）
+│   └── test_evolution_suite.py          # ★自进化 Agent 测试（E1–E16，E6 复现回滚 + E14 漂移 + E15 迁移 + E16 外循环）
 │
 └── GEFCom2014-L_V2/                     # 数据集 (gitignored)
 ```
@@ -243,7 +267,33 @@ python experiments/run_self_evolving_agent.py --task 1 --max-iter 3 --dry-run --
 > 即"第 N 轮退化 → 回滚 → 第 N+1 轮从 best 改善"是显式机制而非偶然
 > （由 `tests/test_evolution_suite.py` E6 确定性复现）。
 
-### 5. 运行 v1 特征工程实验（legacy）
+### 5. 运行外循环（P1-B，跨 Task 漂移检测 + 策略迁移）
+
+```bash
+# 全量 1:15 外循环（真实 LLM 迁移决策 + 进化闭环）
+python experiments/run_outer_loop.py --tasks 1:15 --model lightgbm
+
+# 测试模式（迁移走确定性映射，进化用 ScriptedLLM；persistence 最快）
+python experiments/run_outer_loop.py --tasks 1:3 --model persistence --dry-run
+
+# 审计参考基线（每 Task 多算一次 FEATURE_SPEC RMSE 做三向对比）
+python experiments/run_outer_loop.py --tasks 1:15 --model lightgbm --with-reference-baseline
+```
+
+产出（`experiments/output/outer_loop/`）：
+- `task_{id:02d}/{drift_report, decision, strategy, summary}.json` — 逐 Task 漂移报告 / 迁移决策 / 最优策略 / 评测摘要
+- `outer_loop_summary.csv` — 总表（drift level / policy / max_iter / baseline·best RMSE / transfer_gap）
+- `run_manifest.json` — 审计
+- `memory/strategies.jsonl` — 每 Task 最佳策略库（迁移检索源）
+
+> **双闭环机制**：内循环 = 策略生成→实验→误差诊断→反思→策略更新（P1-A）；
+> 外循环 = Task 变化→漂移识别→经验迁移→策略适应→Memory 更新（P1-B）。
+> 冷启动 Task 1 全量搜索并入库；后续 Task 先由 `drift_detector.py` 确定性度量
+> Task 间变化（low / medium / high），再决定 **继承**（沿用上 Task 特征集 + 2 轮）、
+> **修改**（继承 + 默认轮数重调优）或 **重置**（回到 FEATURE_SPEC + 更多轮数）。
+> `transfer_gap` = 继承策略在本 Task 的 RMSE 相对变化，作为残余漂移信号滚动携带。
+
+### 6. 运行 v1 特征工程实验（legacy）
 
 ```bash
 # 真实 LLM 调用（v1：仅 ADD 特征）
@@ -259,7 +309,7 @@ python experiments/run_feature_agent.py --task 15 --max-iter 3 --dry-run
 - `best_features_*.txt` — 最优迭代使用的完整特征列表
 - `metrics_curve_*.png` — RMSE/MAE/MAPE 三面板迭代曲线图
 
-### 6. 编程方式调用（v1 legacy）
+### 7. 编程方式调用（v1 legacy）
 
 ```python
 from agent.feature_agent import run
@@ -329,6 +379,73 @@ Selector：最优候选优于 best → 接受；否则 current:=best（自动回
   actions / before_rmse / after_rmse / delta / outcome）。
 - 下一轮（或下次运行、其它 Task）按**场景相似度**（季节 + ACF + CV 加权）检索 top-k，
   把"相似场景下哪些特征有效 / 哪些导致退化"直接喂给 LLM 上下文。
+
+---
+
+## 外循环：漂移检测 + 策略迁移（P1-B）
+
+P1-B 把 P1-A 的**单 Task 自进化**串联到 Task 1–15 滚动评测上，形成**滚动自适应进化双闭环智能体**。
+核心问题：**Task k → Task k+1 发生变化以后怎么办？** —— 先确定性度量变化，再由 LLM 决定策略去留。
+
+```
+                  Task k
+                    │
+                    ▼
+             Drift Detection（drift_detector.py，确定性）
+               均值/方差/分位/ACF24/ACF168/残余误差
+                    │
+        ┌───────────┴───────────┐
+        │                       │
+   Experience/Strategy Memory   当前数据统计（尾部窗口）
+        │                       │
+        └───────────┬───────────┘
+                    ▼
+              LLM 策略迁移（strategy_migration.py）
+                    │
+          ┌─────────┼─────────┐
+          ▼         ▼         ▼
+       继承(low)   修改(medium)  重置(high)
+       init=prev  init=prev     init=FEATURE_SPEC
+       max_iter=2  max_iter=5   max_iter=8
+          └─────────┼─────────┘
+                    ▼
+          EvolutionRunner(init_spec=…)   ← warm-start 内循环
+                    ▼
+             记录 Best Strategy + transfer_gap
+                    ▼
+                  Task k+1
+```
+
+### 漂移检测（`evaluation/drift_detector.py`，纯确定性，LLM 不参与计算）
+
+- `compute_task_stats`：取 Task 历史**尾部 4 周窗口**（Task 历史是严格前缀关系，全长对比会被
+  共享前缀稀释）计算 mean / std / q10·q50·q90 / ACF(24)·ACF(168) / cv / season。
+- `detect_drift`：对比相邻 Task 统计量 → 五类信号全部归一化到 [0,1]：
+  - LOAD：`mean_shift`（σ 计）、`std_shift`、`quantile_shift`（q10/50/90 平均相对变化）
+  - Temporal：`acf24_change` / `acf168_change`（周期强度变化）
+  - Residual：上一策略误差画像的 rmse / bias / peak_error（carryover context）+
+    `transfer_gap` 趋势（继承策略在最近 Task 的退化幅度）
+  - 聚合 `drift_score`（数据 + 时序 + 残余加权，RMS 族内聚合），level = low / medium / high。
+
+### 策略迁移（`agent/strategy_migration.py`）
+
+- `MigrationPlanner.plan()`：输入漂移报告 + 检索到的历史策略 + 上一 Task 策略 → LLM 输出
+  `{policy: inherit|modify|reset, rationale, max_iter?}`；解析失败走**确定性兜底**
+  （low→inherit / medium→modify / high→reset，max_iter 2 / 5 / 8）。
+- `resolve_init_spec`：候选 init_spec 复用 `validate_spec_list` 血缘静态校验，违规回退 FEATURE_SPEC。
+- **warm-start**：`EvolutionRunner(init_spec=决策.init_spec, max_iter=决策.max_iter)`
+  （`evolution_runner.py` 新增 `init_spec` 参数），Round 0 即评测继承策略，
+  `transfer-gap = (baseline_rmse − 上一 Task best_rmse) / 上一 Task best_rmse` 天然可测。
+
+### 策略级记忆（`memory/memory_manager.py`）
+
+- `StrategyRecord` 落盘 `memory/strategies.jsonl`（task_id / spec / rmse / scenario /
+  stats / profile / policy / transfer_gap），`retrieve_strategies` 复用场景相似度检索，
+  是迁移决策"检索相似 Task 经验"的数据源。
+
+> **已知特性**：漂移检测度量的是**训练尾窗**的负荷形态。若波动集中在**预测月本身**（如 Task 11
+> 2011-08 高波动月），预跑数据漂移可能为 low，但**残余信号（transfer_gap）会在该 Task 完成后**
+> 抬升下一轮漂移分——这正是"双闭环"补盲区的机制。
 
 ---
 
@@ -480,10 +597,11 @@ df_new, added_cols, skipped = execute_features_from_llm(df, validated)
 ## TODO
 
 - [ ] P1-A 真实 LLM 全量验证（Task 1–15，发布前跑 `--leak-check full` 全量审计）
+- [x] ~~漂移检测 Agent（P1-B：`evaluation/drift_detector.py` + `agent/strategy_migration.py`）~~
+- [x] ~~多 Task 冷启动 / 策略迁移（P1-B：`run_outer_loop.py`，warm-start 继承历史最佳策略）~~
+- [ ] P1-B 真实 LLM 全量验证（Task 1–15 外循环，迁移决策走真实 QwenClient）
 - [ ] recursive_month_ahead 作为主评测口径（当前仅 online_h1 为主）
-- [ ] 漂移检测 Agent (`agent/drift_agent.py`，ROADMAP V2.0)
 - [ ] 超参调优 Agent (`agent/tuning_agent.py`)
 - [ ] 报告生成 Agent (`agent/report_agent.py`)
 - [ ] Transformer 基线模型 (`models/Transformer/`)
-- [ ] 多 Task 冷启动：用历史经验记忆自动初始化特征集
 - [ ] 多能源扩展（Wind：`GEFCom2014-W_V2`）
