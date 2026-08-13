@@ -1,14 +1,18 @@
 # AutoML-Agent
 
-LLM 驱动的 AutoML Agent —— 面向短期电力负荷预测的**自动化特征工程**、**自进化特征优化**与**无泄漏闭环评测**系统。
+LLM 驱动的 AutoML Agent —— 面向**多能源时序预测**（负荷 / 风电 / 电价）的**自动化特征工程**、**自进化特征优化**、**无泄漏闭环评测**与**决策价值评估**系统。
 
-**核心创新**：大语言模型（LLM）作为**预测建模决策器**，在**受约束动作空间**（ADD / REMOVE / REPLACE / KEEP / ROLLBACK / STOP 六类动作，特征仅允许 lag / rolling / time / cross 四类确定性操作，参数受时间因果性与安全上限约束）内**自主设计与删改特征**。每轮 Agent 在**误差画像**（分段 RMSE + bias）驱动下提出 **3 个不同假设的候选方案**，逐一评测后**择优 / 自动回滚**，并把每次实验写入**经验记忆**（跨 Task 共享，场景相似度检索复用）。所有评测跑在**无泄漏滚动回放**（预测月 online_h1）之上，保证结果可信。LLM 不写代码——基于数据统计、自相关分析（ACF）、特征重要性、误差画像和历史经验，**自主决定**生成 / 删除什么特征；确定性执行引擎负责**安全执行**。两者构成完整的 **感知→决策→执行→评估→反馈→记忆** 闭环。
+**核心创新**：大语言模型（LLM）作为**预测建模决策器**，在**受约束动作空间**（ADD / REMOVE / REPLACE / KEEP / ROLLBACK / STOP 六类动作，特征仅允许 lag / rolling / time / cross 四类确定性操作，参数受时间因果性与安全上限约束）内**自主设计与删改特征**。每轮 Agent 在**误差画像**（分段 RMSE + bias）驱动下提出 **3 个不同假设的候选方案**，逐一评测后**择优 / 自动回滚**，并把每次实验写入**经验记忆**（跨 Task 共享，场景相似度检索复用）。所有评测跑在**无泄漏滚动回放**（预测月 online_h1）之上，保证结果可信。LLM 不写代码——基于数据统计、自相关分析（ACF）、特征重要性、误差画像和历史经验，**自主决定**生成 / 删除什么特征；确定性执行引擎负责**安全执行**。两者构成完整的 **感知→决策→执行→评估→反馈→记忆** 闭环。最终，预测不只在 RMSE / CRPS 等精度指标上被评估，还会被接入**储能套利决策评估器**，把预测误差货币化为**套利利润 / Regret**（业务/决策驱动，详见 ROADMAP V2.1）。
 
 **外循环（P1-B）**：把自进化 Agent 串联到 Task 1–15 滚动评测上，形成**滚动自适应进化双闭环智能体**——每完成一个 Task 保存**最佳策略 + 经验**，进入下一个 Task 前用**确定性漂移检测**（`evaluation/drift_detector.py`：均值 / 方差 / 分位 / ACF 周期 / 残余误差五类信号）度量 Task 间变化，再由 LLM 决定**继承 / 修改 / 重置**策略（`agent/strategy_migration.py`），以**warm-start**（`EvolutionRunner(init_spec=…)`）+ **自适应迭代预算**开始新一轮内循环。内循环负责"单 Task 自进化"，外循环负责"Task 间自适应迁移"。
 
-数据集：[GEFCom2014-L_V2](https://www.sciencedirect.com/journal/international-journal-of-forecasting/vol/30/issue/2)（Global Energy Forecasting Competition 2014，负荷预测赛道，含 15 个任务）
+数据集：
+- [GEFCom2014-L_V2](https://www.sciencedirect.com/journal/international-journal-of-forecasting/vol/30/issue/2)（负荷赛道，15 任务）—— 主论文核心
+- GEFCom2014-W_v2（风电赛道，15 Task × 10 Zone）—— ✅ 已接入（无泄漏滚动回放，LightGBM 基线 Mean RMSE 0.0998）
+- GEFCom2014-P_V2（电价赛道，15 任务，单分区）—— **决策效能评估主线（价值出口）**：储能套利评估器把预测误差货币化为利润 / Regret（P-Value）
 
-> **计划扩展**：后续将陆续增加更多电力负荷预测数据集，覆盖不同地区、时间粒度和数据特征，以验证模型和特征工程策略的通用性与鲁棒性。
+> **演进方向**：从「负荷预测」扩展为「多能源自主智能体」，最终以**决策价值**为价值出口 ——
+> 预测不止于「准」，更在于「有用」。详见 [ROADMAP.md](ROADMAP.md)（V2.1 三层架构）。
 
 ---
 
@@ -79,6 +83,10 @@ LLM 驱动的 AutoML Agent —— 面向短期电力负荷预测的**自动化�
      + memory/strategies.jsonl（每 Task 最佳策略库）
 ```
 
+> **价值出口层（V2.1，业务/决策驱动）**：预测不只以精度评估，还会被接入**储能套利决策评估器**
+> —— 把 Market/Price Agent 的电价预测喂给带约束的虚拟储能 LP，按预测决策、按真实结算，
+> 产出**套利利润 / Regret**（预测误差的货币化）。三层架构 + P-Value 里程碑详见 [ROADMAP.md](ROADMAP.md)。
+
 ---
 
 ## 项目结构
@@ -91,7 +99,8 @@ AutoML-Agent/
 │   ├── availability.py                  # 每个 Task 的「可用历史 + 预测区间」定义
 │   ├── task_builder.py                  # 血缘式特征规格 + 严格过去向特征构造（lag/rolling/time/cross）+ GEFComTask
 │   ├── wind_loader.py                   # ★Wind 加载器（15 Task × 10 Zone：train/expvars/benchmark/solution + 真值解析）
-│   └── wind_task_builder.py             # ★Wind 特征规格（气象外生 U/V→风速/风向）+ WindTask 构建
+│   ├── wind_task_builder.py             # ★Wind 特征规格（气象外生 U/V→风速/风向）+ WindTask 构建
+│   └── price_loader.py                  # (TODO) Price 电价加载器（P-Value：决策效能主线）
 │
 ├── evaluation/                          # 无泄漏滚动回放评测体系
 │   ├── forecast_protocol.py             # 评测协议（online_h1 / recursive_month_ahead）
@@ -102,7 +111,8 @@ AutoML-Agent/
 │   ├── spec_evaluator.py                # 候选特征集评测器（decision metric = 预测月 online_h1）
 │   ├── drift_detector.py                # ★跨 Task 漂移检测（尾部窗口均值/方差/分位/ACF/残余误差 → score/level）
 │   ├── task_replay.py                   # Task 1–15 回放主循环 + 审计输出（predictions/run_manifest）
-│   └── wind_replay.py                   # ★Wind 回放主循环（15 Task × 10 Zone 逐分区独立模型 + 气象外生特征）
+│   ├── wind_replay.py                   # ★Wind 回放主循环（15 Task × 10 Zone 逐分区独立模型 + 气象外生特征）
+│   └── arbitrage_evaluator.py           # (TODO) 储能套利评估器（LP + Regret，P-Value 价值出口）
 │
 ├── models/
 │   ├── baseline/
@@ -130,7 +140,8 @@ AutoML-Agent/
 │   ├── feature_engine.py                # 确定性特征执行引擎（lag/rolling/time/cross）[legacy]
 │   ├── feature_agent.py                 # LLM Agent 协议 + 闭环迭代调度器（v1，仅 ADD）[legacy]
 │   ├── tuning_agent.py                  # (TODO) 超参调优 Agent
-│   └── report_agent.py                  # (TODO) 报告生成 Agent
+│   ├── report_agent.py                  # (TODO) 报告生成 Agent
+│   └── market_agent.py                  # (TODO) 电价 Market/Price Agent（尖峰双层 + 归因，P-Value）
 │
 ├── memory/
 │   └── memory_manager.py                # ★经验记忆（experiment_memory.jsonl 轮级经验 + strategies.jsonl 策略级记忆，场景相似度检索跨 Task 共享）
@@ -140,6 +151,7 @@ AutoML-Agent/
 │   ├── run_outer_loop.py                # ★外循环（P1-B）：逐 Task 漂移检测 → 策略迁移 → warm-start 自进化（CLI）
 │   ├── run_task_replay.py               # Task 1–15 无泄漏滚动回放评测（CLI）
 │   ├── run_wind_replay.py               # ★Wind Task 1–15 × Zone 1–10 无泄漏滚动回放评测（CLI）
+│   ├── run_price_replay.py              # (TODO) Price Task 1–15 无泄漏滚动回放评测（CLI，P-Value）
 │   ├── run_feature_agent.py             # v1 特征工程 Agent 实验（legacy）
 │   ├── feature_agent_task15/            # Task 15 v1 实验输出
 │   └── output/                          # 评测输出（predictions / manifest，gitignored）
@@ -632,3 +644,4 @@ df_new, added_cols, skipped = execute_features_from_llm(df, validated)
 - [ ] Transformer 基线模型 (`models/Transformer/`)
 - [x] ~~多能源扩展 · Wind 数据接入 + 基线回放（`data/wind_loader.py` / `wind_task_builder.py` / `evaluation/wind_replay.py` / `run_wind_replay.py`）~~
 - [ ] 多能源扩展 · Wind 自进化 Agent 泛化 / 多专家协同（V3.0）
+- [ ] 多能源扩展 · Price 决策效能主线（P-Value：`price_loader` + 储能套利评估器 + 尖峰双层，见 ROADMAP）
