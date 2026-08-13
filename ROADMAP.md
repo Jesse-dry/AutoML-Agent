@@ -18,7 +18,8 @@
 ```
 GEFCom2014 Load（电力负荷）── 主论文
   ├── GEFCom2014 Wind（风电）── 新能源泛化
-  ├── GEFCom2014 Solar → GEFCom2012 光伏（场景专家）※校正
+  ├── GEFCom2014 Solar（光伏）── 场景专家
+  ├── GEFCom2014 Price（电价）── 补充赛道（可选）
   ├── ECL（370 用户负荷）──── 跨用户迁移
   ├── ETT（变压器长序列）──── 模型选择
   └── Pecan Street（家庭能源）── 应用展示
@@ -35,13 +36,13 @@ GEFCom2014 Load（电力负荷）── 主论文
 | # | 数据集 | 任务 | 采样/规模 | 用途 | 验证创新 | 优先级 |
 |---|--------|------|-----------|------|----------|--------|
 | 1 | GEFCom2014 Load | 负荷 | 15 个 Task，1h | 主论文核心 | 滚动自进化 + 风险感知 | 必备 |
-| 2 | GEFCom2014 Wind | 风电 | 15 个 Task，1h | 新能源泛化 | 滚动自进化 + 多专家 + 风险 | ★★★★★ |
-| 3 | GEFCom2012 Solar ※ | 光伏 | 含昼夜/天气 | 场景专家 | 多专家协同 | ★★★★★ |
+| 2 | GEFCom2014 Wind | 风电 | 15 Task × 10 分区（Zone），1h | 新能源泛化 | 滚动自进化 + 多专家 + 风险 | ★★★★★ |
+| 3 | GEFCom2014 Solar | 光伏 | 15 Task，1h，含天气预测变量 | 场景专家 | 多专家协同 | ★★★★★ |
 | 4 | ECL | 用户级负荷 | 370 用户，15min | 跨用户迁移 | 时序经验记忆 | ★★★★★ |
 | 5 | ETT | 变压器长序列 | 4 个变体，1h/15min | 模型选择 | 模型选择 Agent | ★★★★ |
 | 6 | Pecan Street | 家庭能源 | 数百家庭，1min | 应用展示 | 家庭场景专家 | ★★★★ |
 
-> ※ **数据校正**：GEFCom2014 官方只有 **Load / Wind / Price** 三个赛道，**没有 Solar 赛道**。光伏实验建议改用 **GEFCom2012 光伏赛道**（同竞赛体系、数据格式接近），或 NREL / DKASC 光伏数据集。多专家设计不受影响。
+> ※ **数据校正**：GEFCom2014 官方共 **4 个赛道** —— **Load / Price / Solar / Wind**（另有 `GEFCom2014-E.xlsx` 误差分析表），均为 15 个 Task。四套原始压缩包已全部在本仓库 `GEFCom2014 Data/`（`GEFCom2014-{L,P,S,W}_V2.zip`），光伏不必另找 GEFCom2012 或 NREL/DKASC。
 
 ### 各数据集与 Agent 设计
 
@@ -54,6 +55,8 @@ GEFCom2014 Load（电力负荷）── 主论文
 #### 2. GEFCom2014 Wind（风电）★★★★★
 
 **为什么适合**：负荷周期强、规律明显；而风电**随机性强、天气驱动强、非平稳**。风电更能检验 Agent 是**真的理解了场景**，还是只是找到了 `lag_24` 这种捷径。
+
+**数据结构**：15 个 Task × 10 个分区（Zone），1h 采样。每 Task = `benchmark{k}_W.csv`（50 分位模板）+ `Task{k}_W_Zone1_10.zip`（10 分区历史）+ `TaskExpVars{k}_W_Zone1_10.zip`（气象预测变量）；官方真值文件仅 `Solution to Task 15/solution15_W.csv`（真值语义待 loader 泛化时逐项验证）。
 
 为风电设计的 Agent：
 
@@ -68,9 +71,11 @@ Scenario Agent
 
 **创新包装**：面向高随机性新能源出力预测的**风险感知型自主学习智能体**。
 
-#### 3. GEFCom2012 Solar（光伏）★★★★★（数据源已校正）
+#### 3. GEFCom2014 Solar（光伏）★★★★★
 
 **特点**：夜间为 0、白天周期、天气影响、季节变化——离散状态明显，是分场景专家的理想验证场。
+
+**数据结构**：15 个 Task，1h 采样。每 Task = `train{k}.csv` + `benchmark{k}.csv` + `predictors{k}.csv`（天气变量）；官方真值文件仅 `Solution to Task 15/Solution to Task 15.csv`。
 
 ```
 Night Expert（夜间恒 0）
@@ -255,7 +260,7 @@ Household Energy Agent
 1. 先扩 **GEFCom2014 Wind**（同一竞赛体系，数据格式与 Load 最接近，改动最小）
 2. 再补 **ECL**（UCI 公开下载，无协议门槛，做跨用户迁移）
 3. **ETT**（长序列，github 公开）
-4. **GEFCom2012 Solar**（光伏，需单独获取）与 **Pecan Street**（需数据协议，最后）
+4. **GEFCom2014 Solar**（光伏，已在本地 `GEFCom2014-S_V2.zip`）与 **Pecan Street**（需数据协议，最后）
 
 ---
 
@@ -264,7 +269,12 @@ Household Energy Agent
 ### P0 —— 论文主线（V2.0）
 
 - [x] **多任务滚动预测框架（Load 版）** ⭐⭐⭐⭐⭐ `data/gefcom_loader.py` + `task_builder.py` + `task_replay.py`
-  - Task15 only → Load 全 15 Task 无泄漏滚动回放已落地；待扩 Wind
+  - Task15 only → Load 全 15 Task 无泄漏滚动回放已落地；Wind 已接入（见下）
+- [x] **Wind 风电赛道接入（P0）** ⭐⭐⭐⭐⭐ `data/wind_loader.py` + `data/wind_task_builder.py` + `evaluation/wind_replay.py` + `experiments/run_wind_replay.py`
+  - 15 Task × 10 Zone 无泄漏滚动回放（逐分区独立模型，Task 得分 = 10 分区均值）
+  - 气象外生特征：U10/V10/U100/V100 → 风速/风向/切变；预测月气象取 TaskExpVars 预报（决策时点可得）
+  - Wind LightGBM 基线 Mean RMSE = 0.0998（归一化 [0,1] 量纲），Mean R² = 0.873（tests W1–W6 全绿）
+  - 待扩：Wind 自进化 Agent 泛化（feature_agent/evolution_runner LOAD 硬编码 + feature_spec 的 source==target 限制 + memory 无 energy 字段）
 - [x] **Experience Memory（Load 版）** ⭐⭐⭐⭐⭐ `memory/experiment_memory.jsonl`（轮级）+ `memory/strategies.jsonl`（策略级）
   - 滚动自进化 + 跨 Task 迁移的基础
 - [x] **Drift Detection + Strategy Migration（Load 版，P1-B）** ⭐⭐⭐⭐⭐ `evaluation/drift_detector.py` + `agent/strategy_migration.py` + `experiments/run_outer_loop.py`
@@ -297,4 +307,4 @@ Household Energy Agent
 2. 多数据集版图（Load / Wind / Solar / ECL / ETT / Pecan Street）
 3. 创新点 ↔ 数据集验证矩阵 + 5 实验矩阵
 4. V2.0 任务序列扩展为跨能源；V3.0 专家能源化
-5. **数据校正**：GEFCom2014 无 Solar 赛道，改用 GEFCom2012 或 NREL/DKASC
+5. **数据校正**：GEFCom2014 官方含 Load/Price/Solar/Wind 四赛道，Solar 数据已本地化（此前误写「无 Solar 赛道」）

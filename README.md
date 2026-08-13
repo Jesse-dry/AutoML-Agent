@@ -89,7 +89,9 @@ AutoML-Agent/
 │   ├── preprocessing.py                 # 数据预处理流水线（时间戳消歧 / 填充 / 切分 / 基线特征）[legacy]
 │   ├── gefcom_loader.py                 # GEFCom 统一加载器（train/benchmark/solution + 真值解析）
 │   ├── availability.py                  # 每个 Task 的「可用历史 + 预测区间」定义
-│   └── task_builder.py                  # 血缘式特征规格 + 严格过去向特征构造（lag/rolling/time/cross）+ GEFComTask
+│   ├── task_builder.py                  # 血缘式特征规格 + 严格过去向特征构造（lag/rolling/time/cross）+ GEFComTask
+│   ├── wind_loader.py                   # ★Wind 加载器（15 Task × 10 Zone：train/expvars/benchmark/solution + 真值解析）
+│   └── wind_task_builder.py             # ★Wind 特征规格（气象外生 U/V→风速/风向）+ WindTask 构建
 │
 ├── evaluation/                          # 无泄漏滚动回放评测体系
 │   ├── forecast_protocol.py             # 评测协议（online_h1 / recursive_month_ahead）
@@ -99,7 +101,8 @@ AutoML-Agent/
 │   ├── error_profiler.py                # 误差画像（时段/负荷状态/变化状态分段 + bias + top-worst）
 │   ├── spec_evaluator.py                # 候选特征集评测器（decision metric = 预测月 online_h1）
 │   ├── drift_detector.py                # ★跨 Task 漂移检测（尾部窗口均值/方差/分位/ACF/残余误差 → score/level）
-│   └── task_replay.py                   # Task 1–15 回放主循环 + 审计输出（predictions/run_manifest）
+│   ├── task_replay.py                   # Task 1–15 回放主循环 + 审计输出（predictions/run_manifest）
+│   └── wind_replay.py                   # ★Wind 回放主循环（15 Task × 10 Zone 逐分区独立模型 + 气象外生特征）
 │
 ├── models/
 │   ├── baseline/
@@ -136,6 +139,7 @@ AutoML-Agent/
 │   ├── run_self_evolving_agent.py       # ★自进化 Agent 实验（CLI：--task / --max-iter / --dry-run / --n-candidates）
 │   ├── run_outer_loop.py                # ★外循环（P1-B）：逐 Task 漂移检测 → 策略迁移 → warm-start 自进化（CLI）
 │   ├── run_task_replay.py               # Task 1–15 无泄漏滚动回放评测（CLI）
+│   ├── run_wind_replay.py               # ★Wind Task 1–15 × Zone 1–10 无泄漏滚动回放评测（CLI）
 │   ├── run_feature_agent.py             # v1 特征工程 Agent 实验（legacy）
 │   ├── feature_agent_task15/            # Task 15 v1 实验输出
 │   └── output/                          # 评测输出（predictions / manifest，gitignored）
@@ -244,6 +248,28 @@ python experiments/run_task_replay.py --tasks 1:3 --model lightgbm --leak-check 
 > 适用于短期滚动预测 Agent，**不复现 GEFCom 官方 month-ahead 信息条件**；
 > `recursive_month_ahead` 为 month-ahead 近似，预测月内只用预测值回填。
 > 二者共享同一无泄漏特征工程（lag/rolling 严格过去窗口，训练/预测特征空间一致）。
+
+### 3.1 Wind 风电赛道滚动回放（P0）
+
+风电赛道（`GEFCom2014-W_v2/`）：15 Task × 10 Zone，预测月逐月推进（Task1=2012-10 … Task15=2013-12）。
+目标为归一化出力 `TARGETVAR` [0,1]，特征含**气象外生**（U10/V10/U100/V100 → 风速/风向/切变），
+预测月内气象列取 `TaskExpVars` 预报（决策时点可得，非泄漏）。逐分区独立模型，Task 得分 = 10 分区指标均值。
+
+```bash
+# 全量 1:15 × 10 Zone 回放（LightGBM / persistence / seasonal naive）
+python experiments/run_wind_replay.py --tasks 1:15 --model lightgbm
+python experiments/run_wind_replay.py --tasks 1:15 --model persistence
+# 指定分区 / 任务 / 快速泄漏检查
+python experiments/run_wind_replay.py --tasks 1:3 --zones 1:3 --model lightgbm --leak-check fast
+```
+
+产出（`experiments/output/wind_replay/`）：
+- 逐 Task（Zone 均值）RMSE 表 + **Mean / Std / Worst**；`detail_summary_*.csv` 逐 Task×Zone 明细
+- `predictions/task_{01..15}_zone_{01..10}.csv` — 逐小时 `y_true / y_pred / error`
+- `run_manifest.json` — 数据集 / zones / 特征血缘哈希 / seed / git_commit 审计
+
+> **Wind 基线**（LightGBM，online_h1）：Mean RMSE **0.0998**（归一化 [0,1] 量纲），Mean R² 0.873，
+> 优于 persistence（对比见下文），验证风电天气驱动场景下气象外生特征有效。
 
 ### 4. 运行自进化 Agent（P1-A）
 
@@ -604,4 +630,5 @@ df_new, added_cols, skipped = execute_features_from_llm(df, validated)
 - [ ] 超参调优 Agent (`agent/tuning_agent.py`)
 - [ ] 报告生成 Agent (`agent/report_agent.py`)
 - [ ] Transformer 基线模型 (`models/Transformer/`)
-- [ ] 多能源扩展（Wind：`GEFCom2014-W_V2`）
+- [x] ~~多能源扩展 · Wind 数据接入 + 基线回放（`data/wind_loader.py` / `wind_task_builder.py` / `evaluation/wind_replay.py` / `run_wind_replay.py`）~~
+- [ ] 多能源扩展 · Wind 自进化 Agent 泛化 / 多专家协同（V3.0）
