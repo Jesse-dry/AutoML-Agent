@@ -275,6 +275,7 @@ Household Energy Agent
   - 气象外生特征：U10/V10/U100/V100 → 风速/风向/切变；预测月气象取 TaskExpVars 预报（决策时点可得）
   - Wind LightGBM 基线 Mean RMSE = 0.0998（归一化 [0,1] 量纲），Mean R² = 0.873（tests W1–W6 全绿）
   - 待扩：Wind 自进化 Agent 泛化（feature_agent/evolution_runner LOAD 硬编码 + feature_spec 的 source==target 限制 + memory 无 energy 字段）
+  - **候选 Agent 动作**（`experiments/explore_wind_weather.py` 探索实验）：加"当前小时风速预报 ws100@t"（TaskExpVars 决策时点可得，外生非泄漏）。平均 RMSE ↓3.3%，但**收益场景相关**（Task15-z5 ↓7% / Task1-z5 ↓7.8% / Task7-z1、Task9-z1 略差 ↑0.3~0.6%）→ 不宜固化进固定特征，列为后续 Wind 自进化 Agent 的可选动作，由 Agent 按场景判定是否启用。启用需支持新的 spec 特征类型（exogenous/current，source 非目标列、lookback 0），涉及 build_features / _features_at / leakage_checker Pass A / feature_spec.normalize_spec 的扩展（均 additive，Load 零回归）
 - [x] **Experience Memory（Load 版）** ⭐⭐⭐⭐⭐ `memory/experiment_memory.jsonl`（轮级）+ `memory/strategies.jsonl`（策略级）
   - 滚动自进化 + 跨 Task 迁移的基础
 - [x] **Drift Detection + Strategy Migration（Load 版，P1-B）** ⭐⭐⭐⭐⭐ `evaluation/drift_detector.py` + `agent/strategy_migration.py` + `experiments/run_outer_loop.py`
