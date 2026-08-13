@@ -1,7 +1,8 @@
-# AutoML-Agent 演进路线图 V2.0（多能源扩展版）
+# AutoML-Agent 演进路线图 V2.1（多能源扩展 + 业务/决策驱动版）
 
 > 本文件为项目演进路线的**唯一依据**（多能源扩展版）。
-> 核心变化：从「单数据集（GEFCom2014 Load）特征工程闭环」升级为「**面向多能源场景的滚动自进化风险感知自主机器学习智能体**」。
+> 核心变化：从「单数据集（GEFCom2014 Load）特征工程闭环」升级为「**面向多能源场景的滚动自进化风险感知自主机器学习智能体**」，
+> 并以 **决策价值（业务/决策驱动）** 为最终价值出口 —— 预测不止于「准」，更在于「有用」。
 
 ---
 
@@ -9,7 +10,7 @@
 
 | | 旧定位（V1.0） | 新定位（V2.0 起） |
 |---|---|---|
-| 一句话 | 在 GEFCom2014 上做 LLM 特征工程 | **面向多能源场景的滚动自进化风险感知自主机器学习智能体** |
+| 一句话 | 在 GEFCom2014 上做 LLM 特征工程 | **面向多能源场景的滚动自进化风险感知自主机器学习智能体**，价值出口为**决策效能评估（储能套利）** |
 | 数据 | 单一负荷数据集 | 负荷 + 风电 + 光伏 + 多用户 + 长序列 + 家庭能源 |
 | 能力 | 单任务特征优化 | 跨能源任务 · 跨时间演化 · 跨场景迁移 |
 
@@ -19,13 +20,43 @@
 GEFCom2014 Load（电力负荷）── 主论文
   ├── GEFCom2014 Wind（风电）── 新能源泛化
   ├── GEFCom2014 Solar（光伏）── 场景专家
-  ├── GEFCom2014 Price（电价）── 补充赛道（可选）
+  ├── GEFCom2014 Price（电价）── 决策效能评估主线（价值出口）
   ├── ECL（370 用户负荷）──── 跨用户迁移
   ├── ETT（变压器长序列）──── 模型选择
   └── Pecan Street（家庭能源）── 应用展示
 ```
 
-项目不再是"在 GEFCom2014 上调 LightGBM 特征"，而是"**构建一个能够跨能源任务、跨时间演化、跨场景迁移的自主预测智能体**"——更贴近当前 AI Agent + AutoML + Energy AI 的研究方向。
+项目不再是"在 GEFCom2014 上调 LightGBM 特征"，而是"**构建一个能够跨能源任务、跨时间演化、跨场景迁移、并能把预测转成决策价值的自主智能体**"——更贴近当前 AI Agent + AutoML + Energy AI 的研究方向。
+
+**项目架构（业务/决策驱动，三层）**：
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  价值出口层（新增 · 核心）—— 业务/决策驱动                       │
+│  Market/Price Agent（电价预测 + 尖峰捕获 + 归因报告）           │
+│    → Storage Arbitrage Evaluator（储能套利决策层）             │
+│      LP 决策 → 按预测决策 / 按真实结算 → 利润 / Regret         │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ 预测输出（点 / 分位数）
+┌───────────────────────────┴──────────────────────────────────┐
+│  能力引擎层                                                    │
+│  自进化 Agent（V2.0 双闭环）· 多能源专家协同（V3.0）· 风险感知（V4.0）│
+└───────────────────────────┬──────────────────────────────────┘
+                            │ 无泄漏滚动回放
+┌───────────────────────────┴──────────────────────────────────┐
+│  底层环境层                                                    │
+│  GEFCom2014 Load（负荷）· Wind（风电）· Solar（光伏）           │
+│  Task 1–15 滚动回放 · 10 分区独立模型                          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**评估双主线（不是取代，是分层）**：
+- **精度主线（科学基线）**：RMSE / MAE / CRPS / Coverage —— 保证预测统计上可靠，是决策层的**诚实性锚点**（防止 Agent 为套利利润过度博弈尖峰）
+- **决策主线（业务展示）**：储能套利利润 / Regret（完美预知 LP 利润 − Agent 利润）= **预测误差的货币化** —— 回答"预测准了然后呢"
+
+> 关系：精度是基底层，决策价值是展示层。同一个自主智能体，既要预测统计可靠（CRPS），
+> 又要能把预测转成真金白银（套利利润）——这正是 Energy AI 与运筹交叉的前沿叙事
+> （Decision-focused Forecasting）。
 
 ---
 
@@ -41,6 +72,7 @@ GEFCom2014 Load（电力负荷）── 主论文
 | 4 | ECL | 用户级负荷 | 370 用户，15min | 跨用户迁移 | 时序经验记忆 | ★★★★★ |
 | 5 | ETT | 变压器长序列 | 4 个变体，1h/15min | 模型选择 | 模型选择 Agent | ★★★★ |
 | 6 | Pecan Street | 家庭能源 | 数百家庭，1min | 应用展示 | 家庭场景专家 | ★★★★ |
+| 7 | GEFCom2014 Price | 电价 | 15 Task，1h，单分区（ZONEID=1） | **决策效能评估主线（价值出口）** | 决策导向评估（储能套利 + 尖峰捕获） | ★★★★★ |
 
 > ※ **数据校正**：GEFCom2014 官方共 **4 个赛道** —— **Load / Price / Solar / Wind**（另有 `GEFCom2014-E.xlsx` 误差分析表），均为 15 个 Task。四套原始压缩包已全部在本仓库 `GEFCom2014 Data/`（`GEFCom2014-{L,P,S,W}_V2.zip`），光伏不必另找 GEFCom2012 或 NREL/DKASC。
 
@@ -123,6 +155,35 @@ Household Energy Agent
   场景：普通家庭 / 有 PV 家庭 / 有 EV 家庭 / 储能家庭
 ```
 
+#### 7. GEFCom2014 Price（电价）★★★★★（决策效能评估主线）
+
+**为什么适合**：电价由市场均衡决定——尖峰 / 肥尾（均值 48，p99 156，max 363）、均值回归、需求驱动。
+它是整个项目从"预测"走向"决策"的**价值出口**：预测误差可以直接翻译成储能套利的真实利润。
+
+**数据结构**：15 Task、1h、**单分区（ZONEID=1）**。每 Task = `Task{k}_P.csv`（目标 `Zonal Price` +
+外生「Forecasted Total/Zonal Load」，决策时点可得）+ `Benchmark{k}_P.csv`（99 分位模板）+ 官方真值
+（k<15 在 `Task{k+1}_P.csv`，Task15 在 `Solution to Task15`）。timestamp 为 Load 格式（`load_single_task`
+可直接解析）；预测窗口语义与 Load/Wind 略异（Task1 起于 2013-06-16，非整月），接入时需单独验证。
+
+> ⚠️ **数据边界**：Load / Wind / Price 是**三套不同物理系统**（Load 赛道 ~150MW、Price 赛道 ~18GW、
+> Wind 为 ERCOT 风电），**跨赛道的 NetLoad / 空间拓扑 不成立**。市场均衡分析必须在**电价赛道内**进行
+> （"负荷→价格"凸性敏感度），储能套利评估**只用电价赛道**，自洽。
+
+为电价设计的 Agent / 评估器：
+
+```
+Market/Price Agent
+  尖峰双层：分类预警（是否尖峰）+ 数值回归（尖峰幅度）
+  经济交叉特征：负荷→价格凸性敏感度（赛道内）
+  LLM 归因报告：风电骤降 / 负荷激增 等事件溯源
+Storage Arbitrage Evaluator（价值出口）
+  LP：max Σ(P̂_t·E_dis − P̂_t·E_ch/η)  s.t. SOC/功率边界 + 期末 SOC 约束
+  结算：按预测决策、按真实价格结算；Regret = 完美预知利润 − Agent 利润
+```
+
+**创新包装**：**决策导向评估**（Decision-focused Forecasting）——同一预测智能体的预测误差被
+货币化为套利利润与 Regret，比单纯 RMSE 有更强的业务纵深。
+
 ---
 
 ## 三、版本演进（多能源化）
@@ -201,6 +262,18 @@ Household Energy Agent
 |------|------|
 | 概率预测协调器 | `agent/uncertainty_agent.py` |
 
+### 价值出口层：储能套利决策评估（业务/决策驱动，跨版本）
+
+预测只是手段，**决策价值才是价值出口**。本层把 Market/Price Agent 的预测接进一个
+带约束的虚拟储能电池 LP，用套利利润与 Regret 反向评估预测质量：
+
+- **决策模型**：`max Σ(P̂_t · E_dis_t − P̂_t · E_ch_t / η)`，约束 = 电池容量 / 充放电功率 /
+  往返效率 η / SOC 边界 / **期末 SOC = 期初**（防清仓套现伪造利润）
+- **结算规则**：按预测价格 P̂ 做充放电决策，按真实价格 P 结算 —— 决策导向评估的定义
+- **Regret** = 完美预知 LP 利润 − Agent 决策利润 = **预测误差的货币化**
+- **与 V4.0 衔接**：分位数预测 → 随机套利（预测不确定性大时保守、小时激进），
+  风险感知落到价值层，而非止步于 Coverage 指标
+
 ### V5.0：完整自主能源预测 AutoML（终极形态）
 
 ```
@@ -229,6 +302,7 @@ Household Energy Agent
 | 创新 2：多专家协同 | Load + Wind + Solar | 三种能源特性差异大，专家分工可解释 | 加权融合 vs 单模型 |
 | 创新 3：风险感知概率预测 | GEFCom2014（原生概率赛道） | 原始任务即分位数预测 | Pinball / CRPS / Coverage / Interval Width |
 | 创新 4：经验迁移 | ECL + Pecan Street | 有大量用户/家庭，可构造迁移场景 | 有 Memory vs 无 Memory 的测试误差 |
+| 创新 5：决策导向评估（储能套利） | GEFCom2014 Price | 电价肥尾尖峰，预测误差可直接货币化 | 套利利润 / Regret / 尖峰捕获率 |
 
 ---
 
@@ -241,8 +315,10 @@ Household Energy Agent
 | **Exp 3** | 滚动自进化 | GEFCom Task1–15 | 逐 Task 指标序列 | RMSE 收敛趋势 | Agent 随任务积累变强 |
 | **Exp 4** | 跨用户迁移 | ECL | 普通模型 vs 有 Memory Agent | RMSE（User 301–370） | Memory 机制有效 |
 | **Exp 5** | 风险预测 | GEFCom | 点预测 vs 概率预测 | Pinball / CRPS / Coverage / Interval Width | 风险感知有效 |
+| **Exp 6** | 决策价值 | GEFCom2014 Price | RMSE 最优 Agent vs 利润最优 Agent | 套利利润 / Regret / 尖峰捕获率 | 决策导向评估有效（预测能赚钱） |
 
-> 建议论文主线：**Exp 1 → Exp 3 → Exp 2 → Exp 5 → Exp 4**（从单能源证明 → 自进化 → 泛化 → 风险 → 迁移，逻辑递进）。
+> 建议论文主线：**Exp 1 → Exp 3 → Exp 2 → Exp 5 → Exp 4 → Exp 6**
+> （单能源证明 → 自进化 → 泛化 → 风险 → 迁移 → 决策价值，逻辑递进）。
 
 ---
 
@@ -253,6 +329,7 @@ Household Energy Agent
 | **P0** | V2.0 滚动自进化 | Task Replay（Load+Wind）+ Drift Detection + Experience Memory | V1.0 已就绪 |
 | **P1** | V3.0 多能源专家 | Energy Expert 层级 + Coordinator | 需要 P0 的场景判定 |
 | **P2** | V4.0 风险感知 | Quantile + Conformal + 概率指标 | 可在 P0 后并行 |
+| **P-Value** | 决策价值闭环（价值出口） | Price 接入 + 储能套利评估器 + 尖峰双层 | 可独立于 P1/P2 推进（电价赛道数据自洽） |
 | **P3** | 工程完善 | 模型选择 Agent、调优 Agent、报告 Agent | 依赖 P1/P2 |
 
 **数据集落地顺序**：
@@ -261,6 +338,13 @@ Household Energy Agent
 2. 再补 **ECL**（UCI 公开下载，无协议门槛，做跨用户迁移）
 3. **ETT**（长序列，github 公开）
 4. **GEFCom2014 Solar**（光伏，已在本地 `GEFCom2014-S_V2.zip`）与 **Pecan Street**（需数据协议，最后）
+
+> ※ **GEFCom2014 Price（电价）**：定位为**决策效能评估主线（价值出口）**，不再是从属于 V4.0 的载体。
+> 接入里程碑：`price_loader` + 基线 → 储能套利评估器（LP + Regret 结算）→ 尖峰双层 → 赛道内经济交叉。
+> 数据已在本地 `GEFCom2014-P_V2.zip`：15 Task、单分区（ZONEID=1），目标 `Zonal Price` + 外生「预测总/分区负荷」
+> （决策时点可得，同 Wind expvars 语义）；timestamp 为 Load 格式（`load_single_task` 可直接解析）；
+> 预测窗口语义与 Load/Wind 略异（Task1 起于 2013-06-16，非整月），接入时需单独验证。
+> 接入成本低（wind_loader 模式可复用）。⚠️ 三赛道为不同物理系统，跨赛道 NetLoad/空间拓扑不成立。
 
 ---
 
@@ -291,12 +375,20 @@ Household Energy Agent
 
 - [ ] **风险感知概率预测** ⭐⭐⭐⭐⭐ `agent/uncertainty_agent.py`
   - Quantile LightGBM + Conformal + Pinball/CRPS/Coverage/Interval Width + 综合评分
+  - 载体：GEFCom2014 Wind（原生分位数赛道）· Price（尖峰，与决策价值层联动，见 P-Value）
 - [ ] **超参调优 Agent** ⭐⭐⭐ 不做独立 Optuna 包装，LLM 对 `model + parameter + feature + ensemble` 统一决策
 
 ### P3 —— 工程完善
 
 - [ ] **报告生成 Agent** `agent/report_agent.py`（实验报告 / 模型比较 / 错误分析 / 可解释性）
 - [ ] Transformer 基线（`models/Transformer/`，配合 ETT 长序列实验）
+
+### P-Value —— 决策价值闭环（业务/决策驱动 · 价值出口）
+
+- [ ] **Price 电价赛道接入** ⭐⭐⭐⭐⭐ `data/price_loader.py` + `data/price_task_builder.py` + `evaluation/price_replay.py` + `experiments/run_price_replay.py`（wind_loader 模式复用；预测窗口语义单独验证）
+- [ ] **储能套利评估器** ⭐⭐⭐⭐⭐ `evaluation/arbitrage_evaluator.py` —— LP（容量/功率/η/SOC 边界 + **期末 SOC=期初**）→ 按预测决策、按真实结算 → **利润 / Regret**
+- [ ] **尖峰双层模型** ⭐⭐⭐⭐ `agent/market_agent.py` —— 分类预警（是否尖峰）+ 回归估计（尖峰幅度）+ LLM 归因报告（风电骤降 / 负荷激增）
+- [ ] **赛道内经济交叉特征** ⭐⭐⭐⭐ 负荷→价格凸性敏感度（二阶导异动）喂给 Agent 场景判断
 
 ---
 
@@ -305,7 +397,8 @@ Household Energy Agent
 旧版 `roadmap.md`（单能源版）已归档删除。本文件为其多能源升级版，新增内容：
 
 1. 项目定位升级（单能源 → 多能源自主智能体）
-2. 多数据集版图（Load / Wind / Solar / ECL / ETT / Pecan Street）
-3. 创新点 ↔ 数据集验证矩阵 + 5 实验矩阵
+2. 多数据集版图（Load / Wind / Solar / ECL / ETT / Pecan Street / Price）
+3. 创新点 ↔ 数据集验证矩阵 + 6 实验矩阵
 4. V2.0 任务序列扩展为跨能源；V3.0 专家能源化
 5. **数据校正**：GEFCom2014 官方含 Load/Price/Solar/Wind 四赛道，Solar 数据已本地化（此前误写「无 Solar 赛道」）
+6. **业务/决策驱动升维**：新增价值出口层（Price 决策效能评估主线 + 储能套利评估器），创新 5 + Exp 6，从「精度叙事」升级为「精度 + 决策价值双层叙事」
