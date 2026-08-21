@@ -123,6 +123,7 @@ def compute_scenario(
     forecast_ts: pd.DatetimeIndex,
     task_id: int = 0,
     target_col: str = "LOAD",
+    energy: str = "load",
 ) -> Scenario:
     """
     全长历史场景向量（与 evolution_runner._build_scenario 同公式）：
@@ -136,6 +137,7 @@ def compute_scenario(
         acf_24=_acf(load, 24),
         acf_168=_acf(load, 168),
         load_cv=cv,
+        energy=energy,
     )
 
 

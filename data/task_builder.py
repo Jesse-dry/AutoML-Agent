@@ -126,6 +126,9 @@ def build_features(
                 raise ValueError(f"未知 time 属性: {attr}")
         elif stype == "lag":
             out[name] = df[s["source"]].shift(s["k"])
+        elif stype == "current":
+            # 外生当前小时值（lookback=0）：直接取当前行外生列（不 shift）。
+            out[name] = df[s["source"]]
         elif stype == "rolling":
             src = df[s["source"]].shift(1)  # 严格过去窗口：先 shift 再 rolling
             roll = src.rolling(window=s["window"], min_periods=s["min_periods"])

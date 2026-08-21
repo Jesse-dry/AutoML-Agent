@@ -166,6 +166,74 @@ def test_w6_replay_lightgbm():
           f"lgb={v_lgb:.4f} pers={v_pers:.4f}")
 
 
+# ---------------- W7 外生当前小时特征（current 类型） ----------------
+def test_w7_current_feature():
+    from agent.feature_spec import name_from_spec, normalize_spec
+    from data.task_builder import build_features
+    from data.wind_task_builder import WIND_FEATURE_SPEC
+    from evaluation.leakage_checker import check_feature_leakage
+    from evaluation.wind_replay import _wind_features_at
+
+    ALLOW = {"TARGETVAR", "ws10", "ws100", "wd10", "wd100", "ws_ratio"}
+
+    # 命名
+    check("W7 current 命名",
+          name_from_spec({"type": "current", "source": "ws100"}, "TARGETVAR") == "ws100_current")
+
+    # normalize：外生放行
+    ns = normalize_spec({"type": "current", "source": "ws100"}, [],
+                        target_col="TARGETVAR", allowed_sources=ALLOW)
+    check("W7 current normalize 外生放行",
+          ns["name"] == "ws100_current" and ns["lookback_end"] == 0
+          and not ns["uses_current_target"])
+
+    # normalize：目标列拒绝（用当前目标=泄漏）
+    rejected = False
+    try:
+        normalize_spec({"type": "current", "source": "TARGETVAR"}, [],
+                       target_col="TARGETVAR", allowed_sources=ALLOW)
+    except ValueError:
+        rejected = True
+    check("W7 current 目标列拒绝", rejected)
+
+    # build_features：current 取当前行外生列（不 shift）
+    idx = pd.date_range("2012-01-01", periods=5, freq="h")
+    df = pd.DataFrame({"TARGETVAR": [0.1, 0.2, 0.3, 0.4, 0.5],
+                       "ws100": [5.0, 6.0, 7.0, 8.0, 9.0]}, index=idx)
+    cur = {"name": "ws100_current", "type": "current", "source": "ws100",
+           "lookback_start": 0, "lookback_end": 0, "uses_current_target": False}
+    out = build_features(df, spec=[cur], target_col="TARGETVAR")
+    check("W7 build_features current 取当前行", out["ws100_current"].iloc[2] == 7.0)
+
+    # 泄漏检查：外生 current 放行 / 目标 current 拒绝
+    df2 = df.copy()
+    df2["ws100_current"] = out["ws100_current"].values
+    ok, viols = check_feature_leakage(df2, spec=[cur], feature_cols=["ws100_current"],
+                                      target_col="TARGETVAR", mode="fast")
+    check("W7 泄漏检查外生 current 放行", ok, str(viols)[:80])
+
+    bad = {"name": "bad_current", "type": "current", "source": "TARGETVAR",
+           "lookback_start": 0, "lookback_end": 0, "uses_current_target": False}
+    df3 = df.copy()
+    df3["bad_current"] = df["TARGETVAR"].values
+    ok_bad, viols_bad = check_feature_leakage(df3, spec=[bad], feature_cols=["bad_current"],
+                                              target_col="TARGETVAR", mode="fast")
+    check("W7 泄漏检查目标 current 拒绝",
+          (not ok_bad) and any(v.kind == "current_uses_target" for v in viols_bad))
+
+    # recursive 逐点：_wind_features_at 取当前气象外生
+    row = _wind_features_at(
+        pd.Series([0.1, 0.2, 0.3], index=idx[:3]),
+        pd.DataFrame({"ws100": [5.0, 6.0, 7.0]}, index=idx[:3]),
+        idx[2], [cur], "TARGETVAR",
+    )
+    check("W7 _wind_features_at current 取当前", row["ws100_current"] == 7.0)
+
+    # 端到端：build_wind_task with spec 含 current，特征列齐全
+    t = build_wind_task(1, 1, spec=list(WIND_FEATURE_SPEC) + [cur])
+    check("W7 build_wind_task 含 current 特征列", "ws100_current" in t.feature_cols)
+
+
 def main():
     print("=" * 60)
     test_w1_loader()
@@ -174,6 +242,7 @@ def main():
     test_w4_forecast_features()
     test_w5_replay_persistence()
     test_w6_replay_lightgbm()
+    test_w7_current_feature()
     print("=" * 60)
     if _FAILED:
         print(f"FAILED: {_FAILED}")

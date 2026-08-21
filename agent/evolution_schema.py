@@ -91,19 +91,51 @@ class EvolutionContext:
     memories_text: str = ""
     round_history_text: str = ""
     max_lag: int = MAX_LAG
+    target_col: str = "LOAD"
+    energy: str = "load"
+    exogenous_sources: List[str] = field(default_factory=list)
 
 
-def _spec_help(max_lag: int) -> str:
+def _domain_knowledge(energy: str, target_col: str) -> str:
+    """能源赛道领域知识（注入 system prompt 的角色定位与建模要点）。"""
+    if energy == "wind":
+        return (
+            f"你是**风电出力预测**的特征工程决策 Agent。目标列 {target_col} 为归一化风电出力 [0,1]。\n"
+            "风电特性：随机性强、天气驱动、非平稳；出力随风速非线性上升，存在爬坡事件\n"
+            "（短时大幅变化），日/周周期弱于负荷。外生气象预报（ws10/ws100 等）在决策时点\n"
+            "可得，是最重要的特征来源；注意训练侧用历史实际天气、预测侧用气象预报，\n"
+            "存在 train/serve 分布偏移，Agent 应感知这一风险。"
+        )
+    return (
+        f"你是**电力负荷预测**的特征工程决策 Agent。目标列 {target_col} 为电力负荷。\n"
+        "负荷特性：日/周周期强、规律明显；工作日/周末差异大；晚峰低谷是主要误差来源。"
+    )
+
+
+def _spec_help(max_lag: int, target_col: str, exogenous_sources: List[str]) -> str:
     """feature_spec 类型说明（喂 system prompt）。"""
+    src_hint = " / ".join([target_col] + list(exogenous_sources))
+    exo_note = (
+        f"外生列特征会带 source 前缀命名（如 {exogenous_sources[0]}_lag_24）。"
+        if exogenous_sources else ""
+    )
+    current_block = ""
+    if exogenous_sources:
+        current_block = (
+            '5. current {"type":"current", "source":"外生列"}'
+            "  # 外生**当前小时**预报值（lookback=0，决策时点可得）。\n"
+            "   注意：训练侧用历史实际天气、预测侧用预报，存在 train/serve 分布偏移，需谨慎。\n"
+        )
     return f"""
 ## feature_spec 允许的类型（血缘格式，name 由系统推导，无需你给列名）
 
 1. time   {{"type":"time",  "attr":"hour|weekday|month|is_weekend"}}
-2. lag    {{"type":"lag",   "source":"LOAD", "k":1..{max_lag}}}          # 只允许滞后 LOAD
-3. rolling{{"type":"rolling","source":"LOAD", "window":2..{max_lag}, "stat":"mean|std|var|max|min|median|sum|skew|kurt"}}
+2. lag    {{"type":"lag",   "source":"{src_hint}", "k":1..{max_lag}}}
+3. rolling{{"type":"rolling","source":"{src_hint}", "window":2..{max_lag}, "stat":"mean|std|var|max|min|median|sum|skew|kurt"}}
 4. cross  {{"type":"cross", "col1":"已有特征名", "col2":"已有特征名", "operation":"add|subtract|multiply|divide"}}
+{current_block}   - lag/rolling 的 source 可为目标列 {target_col} 或外生列（{src_hint}）。{exo_note}
    - cross 的 col1/col2 必须是**当前特征集里已存在**的特征（建议 lag / rolling / time），
-     禁止直接用 LOAD；若想用某特征做交叉，先在同一候选里 add 它。
+     禁止直接用 {target_col}；若想用某特征做交叉，先在同一候选里 add 它。
 
 动作类型：
   add_feature     {{"type":"add_feature", "feature_spec":{{...}}}}
@@ -115,13 +147,16 @@ def _spec_help(max_lag: int) -> str:
 """
 
 
-def _system_prompt(max_lag: int, n_candidates: int) -> str:
-    return f"""你是电力负荷预测的**特征工程决策 Agent**。你只做决策，不写代码；
+def _system_prompt(max_lag: int, n_candidates: int, target_col: str,
+                   energy: str, exogenous_sources: List[str]) -> str:
+    domain = _domain_knowledge(energy, target_col)
+    spec_help = _spec_help(max_lag, target_col, exogenous_sources)
+    return f"""{domain}你只做决策，不写代码；
 所有特征由确定性引擎执行。你的目标是提升**预测月 online_h1 滚动 RMSE**。
 
 ## 时间因果红线（最高优先级）
 - 特征只能使用 ≤ t-1 的信息：lag/rolling 必须严格过去，禁止任何未来信息。
-- cross 只能组合"过去向特征"，禁止直接用当前时刻的 LOAD。
+- cross 只能组合"过去向特征"，禁止直接用当前时刻的 {target_col}。
 
 ## 每轮动作
 每轮返回 **{n_candidates} 个候选假设**（可 1~{n_candidates} 个），每个候选包含：
@@ -129,6 +164,7 @@ def _system_prompt(max_lag: int, n_candidates: int) -> str:
   例如：A 加强日周期、B 加强周周期、C 针对峰值/特定时段误差）；
 - actions：一组有序动作（0~5 个），对该候选要评估的特征集做修改。
 
+{spec_help}
 ## 特征设计原则
 1. 误差驱动：先看误差画像的 worst_segment / bias，针对性设计（如晚峰低估 →
    加 hour×weekday 交互或对应时段 lag）；不要只看整体 RMSE 泛泛加 lag。
@@ -146,7 +182,7 @@ def _system_prompt(max_lag: int, n_candidates: int) -> str:
     {{
       "candidate_id": 1,
       "hypothesis": "中文假设（≥10字）",
-      "actions": [ {{"type":"add_feature","feature_spec":{{"type":"lag","source":"LOAD","k":48}}}} ]
+      "actions": [ {{"type":"add_feature","feature_spec":{{"type":"lag","source":"{target_col}","k":48}}}} ]
     }}
   ]
 }}
@@ -155,7 +191,8 @@ def _system_prompt(max_lag: int, n_candidates: int) -> str:
 
 def build_llm_v2_messages(ctx: EvolutionContext) -> List[Dict]:
     """渲染 system + user 两条消息。"""
-    sys = _system_prompt(ctx.max_lag, ctx.n_candidates)
+    sys = _system_prompt(ctx.max_lag, ctx.n_candidates, ctx.target_col,
+                         ctx.energy, ctx.exogenous_sources)
 
     feat_list = ", ".join(ctx.current_features) if ctx.current_features else "（无）"
     user = f"""## 任务

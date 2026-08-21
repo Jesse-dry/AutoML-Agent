@@ -63,11 +63,14 @@ class EvolutionRunner:
         max_lag: int = 168,
         init_spec: Optional[List[dict]] = None,
         init_spec_label: str = "",
+        energy: str = "load",
+        zone: Optional[int] = None,
     ):
         self.task_id = task_id
+        self.energy = energy
+        self.zone = zone
         self.backend_factory = backend_factory or (lambda: LightGBMBackend())
         self.protocol = protocol
-        self.spec_evaluator = spec_evaluator or evaluate_spec
         self.llm_client = llm_client
         self.memory = memory
         self.n_candidates = max(1, int(n_candidates))
@@ -77,14 +80,45 @@ class EvolutionRunner:
         self.patience = int(patience)
         self.val_hours = val_hours
         self.seed = seed
-        self.data_dir = data_dir or GEFCOM_DATA_DIR
-        self.dataset_name = dataset_name or f"GEFCom2014 Task {task_id}"
         self.max_lag = int(max_lag)
+
+        # energy/track 资源解析（Load 默认保持现状，Wind 切换并行件）
+        if energy == "wind":
+            from data.wind_loader import (
+                WIND_DATA_DIR,
+                WIND_TARGET_COL,
+                wind_available_history,
+            )
+            from data.wind_task_builder import (
+                WIND_FEATURE_SPEC,
+                WIND_WEATHER_DERIVED_COLS,
+            )
+            from evaluation.spec_evaluator import evaluate_wind_spec
+
+            self.target_col = WIND_TARGET_COL
+            self._base_spec = snapshot(WIND_FEATURE_SPEC)
+            self._default_data_dir = WIND_DATA_DIR
+            self._availability_fn = wind_available_history
+            self._default_spec_evaluator = evaluate_wind_spec
+            self.allowed_sources = {WIND_TARGET_COL, *WIND_WEATHER_DERIVED_COLS}
+            self._default_dataset_name = f"GEFCom2014-W Task {task_id} Zone {zone}"
+        else:
+            self.target_col = TARGET_COL
+            self._base_spec = snapshot(FEATURE_SPEC)
+            self._default_data_dir = GEFCOM_DATA_DIR
+            self._availability_fn = available_history
+            self._default_spec_evaluator = evaluate_spec
+            self.allowed_sources = {TARGET_COL}
+            self._default_dataset_name = f"GEFCom2014 Task {task_id}"
+
+        self.data_dir = data_dir or self._default_data_dir
+        self.dataset_name = dataset_name or self._default_dataset_name
+        self.spec_evaluator = spec_evaluator or self._default_spec_evaluator
 
         # 状态（init_spec 提供跨 Task 迁移的 warm-start 起点；
         # Round 0 评测 init_spec → baseline_rmse = 继承策略在本 Task 的 RMSE）
         self.init_spec = snapshot(init_spec) if init_spec is not None else None
-        base = self.init_spec if self.init_spec is not None else snapshot(FEATURE_SPEC)
+        base = self.init_spec if self.init_spec is not None else snapshot(self._base_spec)
         self.init_spec_label = (
             init_spec_label
             or ("inherited spec" if self.init_spec is not None else "FEATURE_SPEC")
@@ -104,32 +138,45 @@ class EvolutionRunner:
     # 场景
     # ---------------------------------------------------------
     def _build_scenario(self) -> Scenario:
-        av = available_history(self.task_id, self.data_dir)
-        load = av.history_df[TARGET_COL].dropna()
-        cv = float(load.std() / load.mean()) if load.mean() != 0 else 0.0
-        acf = compute_acf_summary(av.history_df, TARGET_COL, lags=[24, 168])
+        if self.energy == "wind":
+            av = self._availability_fn(self.task_id, self.zone, self.data_dir)
+        else:
+            av = self._availability_fn(self.task_id, self.data_dir)
+        target = av.history_df[self.target_col].dropna()
+        cv = float(target.std() / target.mean()) if target.mean() != 0 else 0.0
+        acf = compute_acf_summary(av.history_df, self.target_col, lags=[24, 168])
         season = season_from_month(av.forecast_ts[0].month)
         return Scenario(
             season=season,
             acf_24=float(acf.get(24, 0.0)),
             acf_168=float(acf.get(168, 0.0)),
             load_cv=cv,
+            energy=self.energy,
         )
 
     # ---------------------------------------------------------
     # 评测（带缓存）
     # ---------------------------------------------------------
     def _evaluate(self, spec: List[dict]) -> Dict:
-        key = (self.task_id, feature_spec_hash(spec), self.protocol.name)
+        key = (self.task_id, self.zone, feature_spec_hash(spec), self.protocol.name)
         if key in self._eval_cache:
             return self._eval_cache[key]
-        res = self.spec_evaluator(
-            self.task_id, spec, self.protocol,
-            val_hours=self.val_hours,
-            backend_factory=self.backend_factory,
-            seed=self.seed,
-            data_dir=self.data_dir,
-        )
+        if self.energy == "wind":
+            res = self.spec_evaluator(
+                self.task_id, self.zone, spec, self.protocol,
+                val_hours=self.val_hours,
+                backend_factory=self.backend_factory,
+                seed=self.seed,
+                data_dir=self.data_dir,
+            )
+        else:
+            res = self.spec_evaluator(
+                self.task_id, spec, self.protocol,
+                val_hours=self.val_hours,
+                backend_factory=self.backend_factory,
+                seed=self.seed,
+                data_dir=self.data_dir,
+            )
         self._eval_cache[key] = res
         return res
 
@@ -175,6 +222,9 @@ class EvolutionRunner:
             memories_text=memories_text,
             round_history_text=hist_text,
             max_lag=self.max_lag,
+            target_col=self.target_col,
+            energy=self.energy,
+            exogenous_sources=sorted(self.allowed_sources - {self.target_col}),
         )
 
     # ---------------------------------------------------------
@@ -230,12 +280,15 @@ class EvolutionRunner:
 
             try:
                 filtered_acts = [a for a in acts if a.get("type") != "rollback"]
-                cspec = apply_actions(base_spec, filtered_acts)
+                cspec = apply_actions(base_spec, filtered_acts,
+                                      target_col=self.target_col,
+                                      allowed_sources=self.allowed_sources)
             except ValueError as e:
                 candidates.append({**base, "state": "invalid", "error": str(e)})
                 continue
 
-            viols = validate_spec_list(cspec, max_lag=self.max_lag)
+            viols = validate_spec_list(cspec, target_col=self.target_col,
+                                       max_lag=self.max_lag)
             if viols:
                 candidates.append({
                     **base, "state": "invalid",
@@ -312,6 +365,7 @@ class EvolutionRunner:
         rec = ExperienceRecord(
             task_id=self.task_id,
             round=rnd,
+            energy=self.energy,
             scenario=self._scenario or self._build_scenario(),
             problem={"worst_segment": worst, "bias": profile.bias},
             actions=best_c["actions"],

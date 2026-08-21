@@ -34,7 +34,7 @@ from agent.feature_spec import snapshot  # noqa: E402
 from agent.scripted_llm import ScriptedLLM  # noqa: E402
 from agent.strategy_migration import MigrationPlanner  # noqa: E402
 from data.availability import available_history  # noqa: E402
-from data.task_builder import FEATURE_SPEC  # noqa: E402
+from data.task_builder import FEATURE_SPEC, TARGET_COL  # noqa: E402
 from evaluation.drift_detector import (  # noqa: E402
     TaskStats,
     compute_scenario,
@@ -85,26 +85,49 @@ def run_outer_loop(args) -> List[Dict]:
     protocol = get_protocol(args.protocol)
     backend_factory = lambda: make_backend(args.model)  # noqa: E731
 
+    # energy/track 资源解析（Load 默认；Wind 切换并行件，单分区跨月滚动）
+    energy = args.energy
+    if energy == "wind":
+        from data.wind_loader import WIND_DATA_DIR, WIND_TARGET_COL, wind_available_history
+        from data.wind_task_builder import WIND_FEATURE_SPEC
+        from evaluation.spec_evaluator import evaluate_wind_spec
+
+        target_col = WIND_TARGET_COL
+        base_spec = WIND_FEATURE_SPEC
+        availability_fn = wind_available_history
+        ref_evaluator = evaluate_wind_spec
+        zone = args.zone
+    else:
+        target_col = TARGET_COL
+        base_spec = FEATURE_SPEC
+        availability_fn = available_history
+        ref_evaluator = evaluate_spec
+        zone = None
+
     outdir = Path(args.outdir) if args.outdir else (
-        PROJECT_ROOT / "experiments" / "output" / "outer_loop"
+        PROJECT_ROOT / "experiments" / "output"
+        / ("outer_loop_wind" if energy == "wind" else "outer_loop")
     )
     memory = MemoryManager(Path(args.memory_file)) if args.memory_file else MemoryManager()
 
     # LLM 客户端：dry-run 用 ScriptedLLM（进化闭环）；迁移决策走确定性兜底。
     if args.dry_run:
         llm_client: Optional[QwenClient] = None
-        evolution_llm = ScriptedLLM(_demo_script(args.n_candidates))
-        print(f"模式: DRY RUN（迁移=确定性映射，进化=ScriptedLLM）  Tasks: {tasks}  模型: {args.model}")
+        evolution_llm = ScriptedLLM(_demo_script(args.n_candidates, args.energy))
+        print(f"模式: DRY RUN（迁移=确定性映射，进化=ScriptedLLM）  Tasks: {tasks}  "
+              f"energy={energy}  模型: {args.model}")
     else:
         try:
             llm_client = QwenClient()
             evolution_llm = llm_client
-            print(f"模式: API（{llm_client.model}）  Tasks: {tasks}  模型: {args.model}")
+            print(f"模式: API（{llm_client.model}）  Tasks: {tasks}  "
+                  f"energy={energy}  模型: {args.model}")
         except ValueError as e:
             print(f"[FATAL] API Key 未配置: {e}（可用 --dry-run）", file=sys.stderr)
             return []
 
-    planner = MigrationPlanner(llm_client=llm_client, memory=memory)
+    planner = MigrationPlanner(llm_client=llm_client, memory=memory,
+                               energy=energy, target_col=target_col, base_spec=base_spec)
 
     strategies: Dict[int, StrategyRecord] = {}
     prev_strategy: Optional[StrategyRecord] = None
@@ -112,9 +135,13 @@ def run_outer_loop(args) -> List[Dict]:
 
     for tid in tasks:
         print(f"\n{'=' * 70}\nTask {tid} / {tasks[-1]}\n{'=' * 70}")
-        av = available_history(tid)
-        stats_cur = compute_task_stats(av.history_df, task_id=tid)
-        scenario = compute_scenario(av.history_df, av.forecast_ts, task_id=tid)
+        if energy == "wind":
+            av = availability_fn(tid, zone)
+        else:
+            av = availability_fn(tid)
+        stats_cur = compute_task_stats(av.history_df, task_id=tid, target_col=target_col)
+        scenario = compute_scenario(av.history_df, av.forecast_ts, task_id=tid,
+                                    target_col=target_col, energy=energy)
         print(f"  场景: {scenario.season} acf24={scenario.acf_24:.2f} "
               f"acf168={scenario.acf_168:.2f} cv={scenario.load_cv:.2f} "
               f"尾窗 {stats_cur.tail_start}")
@@ -152,17 +179,24 @@ def run_outer_loop(args) -> List[Dict]:
             init_spec=decision.init_spec,
             init_spec_label=(f"Task {prev_strategy.task_id} best"
                              if prev_strategy is not None else "FEATURE_SPEC"),
+            energy=energy,
+            zone=zone,
         )
         result = runner.run(verbose=args.verbose)
         print(f"  Task {tid}: baseline RMSE={result['baseline_rmse']:.4f} → "
               f"best RMSE={result['best_rmse']:.4f} (round {result['best_round']})")
 
-        # ---- 参考基线（可选）：FEATURE_SPEC 在该 Task 的 RMSE ----
+        # ---- 参考基线（可选）：基础特征集在该 Task 的 RMSE ----
         ref_rmse = None
         if args.with_reference_baseline:
-            ref = evaluate_spec(tid, snapshot(FEATURE_SPEC), protocol,
-                                val_hours=args.val_hours,
-                                backend_factory=backend_factory, seed=args.seed)
+            if energy == "wind":
+                ref = ref_evaluator(tid, zone, snapshot(base_spec), protocol,
+                                    val_hours=args.val_hours,
+                                    backend_factory=backend_factory, seed=args.seed)
+            else:
+                ref = ref_evaluator(tid, snapshot(base_spec), protocol,
+                                    val_hours=args.val_hours,
+                                    backend_factory=backend_factory, seed=args.seed)
             ref_rmse = float(ref["rmse"])
             print(f"  参考基线 FEATURE_SPEC RMSE = {ref_rmse:.4f}")
 
@@ -174,6 +208,7 @@ def run_outer_loop(args) -> List[Dict]:
         profile = runner._current_result["profile"] if runner._current_result else None
         strategy = StrategyRecord(
             task_id=tid,
+            energy=energy,
             spec=result["best_spec"],
             rmse=result["best_rmse"],
             scenario=scenario,
@@ -190,6 +225,8 @@ def run_outer_loop(args) -> List[Dict]:
         # ---- 逐 Task 审计落盘 ----
         row = {
             "task_id": tid,
+            "energy": energy,
+            "zone": zone,
             "forecast_month": av.forecast_month,
             "drift_level": drift.level if drift else "n/a",
             "drift_score": round(drift.drift_score, 4) if drift else None,
@@ -233,6 +270,8 @@ def _write_outputs(outdir: Path, rows: List[Dict], args) -> None:
 
     manifest = {
         "tasks": [r["task_id"] for r in rows],
+        "energy": args.energy,
+        "zone": args.zone if args.energy == "wind" else None,
         "protocol": args.protocol,
         "model": args.model,
         "n_candidates": args.n_candidates,
@@ -251,6 +290,9 @@ def _write_outputs(outdir: Path, rows: List[Dict], args) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="P1-B 跨 Task 漂移检测 + 策略迁移（外循环）")
     parser.add_argument("--tasks", default="1:15", help="任务范围，如 1:15 / 1,3,5")
+    parser.add_argument("--energy", default="load", choices=["load", "wind"],
+                        help="能源赛道：load（负荷）| wind（风电，单分区跨月滚动）")
+    parser.add_argument("--zone", type=int, default=1, help="Wind 分区 1..10（energy=wind 时生效）")
     parser.add_argument("--model", default="lightgbm",
                         help="lightgbm | persistence | seasonal_naive_24 | seasonal_naive_168")
     parser.add_argument("--protocol", default="online_h1",
@@ -269,6 +311,9 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true", help="抑制逐 Task verbose")
     args = parser.parse_args()
     args.verbose = not args.quiet
+    if args.energy == "wind" and not (1 <= args.zone <= 10):
+        print("[ERROR] zone 必须在 1..10", file=sys.stderr)
+        return 1
 
     rows = run_outer_loop(args)
     if not rows:

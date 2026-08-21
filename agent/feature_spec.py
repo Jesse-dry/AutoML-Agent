@@ -40,15 +40,24 @@ ACTION_TYPES = {
 # 确定性命名
 # ---------------------------------------------------------------
 
-def name_from_spec(spec_entry: dict) -> str:
-    """从 spec 确定性生成列名。"""
+def name_from_spec(spec_entry: dict, target_col: str = TARGET_COL) -> str:
+    """从 spec 确定性生成列名。
+
+    lag/rolling 的 source == target_col 时不带 source 前缀（Load 兼容，如
+    lag_24）；source != target_col 时带 source 前缀（外生列，如 ws100_lag_24），
+    避免与目标列同名 lag 撞名。
+    """
     stype = spec_entry["type"]
     if stype == "time":
         return spec_entry["attr"]
+    source = spec_entry.get("source", target_col)
     if stype == "lag":
-        return f"lag_{spec_entry['k']}"
+        return f"lag_{spec_entry['k']}" if source == target_col else f"{source}_lag_{spec_entry['k']}"
     if stype == "rolling":
-        return f"rolling_{spec_entry['stat']}_{spec_entry['window']}"
+        base = f"rolling_{spec_entry['stat']}_{spec_entry['window']}"
+        return base if source == target_col else f"{source}_{base}"
+    if stype == "current":
+        return f"{source}_current"
     if stype == "cross":
         return f"{spec_entry['col1']}_{_OP_WORDS[spec_entry['operation']]}_{spec_entry['col2']}"
     raise ValueError(f"未知特征类型: {stype}")
@@ -66,22 +75,39 @@ def _lookback_of(specs: List[dict], name: str):
     return -1, 0
 
 
+def _check_source(source: str, target_col: str, allowed_sources) -> None:
+    """校验 source 合法性：== target_col 恒允许；外生列必须在 allowed_sources 内。
+
+    allowed_sources=None 时等价于只允许 target_col（旧行为，Load 零回归）。
+    """
+    if source == target_col:
+        return
+    valid = allowed_sources if allowed_sources is not None else set()
+    if source not in valid:
+        raise ValueError(
+            f"source {source!r} 不是合法的外生列（允许外生列: {sorted(valid) or '无'}）"
+        )
+
+
 def normalize_spec(
     raw: dict,
     existing_specs: List[dict],
     target_col: str = TARGET_COL,
     max_lag: int = MAX_LAG,
+    allowed_sources=None,
 ) -> dict:
     """
     把 LLM 提供的扁平 feature_spec 归一化为完整血缘 dict。
 
     - name / lookback_* / min_periods / uses_current_target 由本函数推导并覆盖
       （LLM 提供的 name 一律忽略，确定性命名消除列名冲突）。
+    - source 为目标列时列名不带 source 前缀（Load 零回归）；外生列（source !=
+      target_col）须在 allowed_sources 内，且列名带 source 前缀（如 ws100_lag_24）。
     - 约束不满足抛 ValueError（apply_actions 会使其候选作废，错误进 retry 反馈）。
     """
     stype = raw.get("type")
-    if stype not in ("time", "lag", "rolling", "cross"):
-        raise ValueError(f"feature_spec 的 type 必须是 time/lag/rolling/cross，got {stype!r}")
+    if stype not in ("time", "lag", "rolling", "cross", "current"):
+        raise ValueError(f"feature_spec 的 type 必须是 time/lag/rolling/cross/current，got {stype!r}")
 
     if stype == "time":
         attr = raw.get("attr")
@@ -92,30 +118,45 @@ def normalize_spec(
             "lookback_start": 0, "lookback_end": 0, "uses_current_target": False,
         }
 
+    if stype == "current":
+        source = raw.get("source")
+        if not source:
+            raise ValueError("current 特征必须提供 source 外生列")
+        if source == target_col:
+            raise ValueError(f"current 特征只能作用于外生列，禁止 source={target_col}（用当前目标=泄漏）")
+        _check_source(source, target_col, allowed_sources)
+        return {
+            "name": f"{source}_current", "type": "current", "source": source,
+            "lookback_start": 0, "lookback_end": 0, "uses_current_target": False,
+        }
+
     if stype == "lag":
         source = raw.get("source", target_col)
-        if source != target_col:
-            raise ValueError(f"P1 阶段 lag 只能作用于 {target_col}，got source={source!r}")
+        _check_source(source, target_col, allowed_sources)
         k = raw.get("k")
         if not isinstance(k, int) or isinstance(k, bool) or not (1 <= k <= max_lag):
             raise ValueError(f"lag k 必须是 1..{max_lag} 的整数，got {k!r}")
+        name = f"lag_{k}" if source == target_col else f"{source}_lag_{k}"
         return {
-            "name": f"lag_{k}", "type": "lag", "source": source, "k": k,
+            "name": name, "type": "lag", "source": source, "k": k,
             "lookback_start": -k, "lookback_end": -k, "uses_current_target": False,
         }
 
     if stype == "rolling":
         source = raw.get("source", target_col)
-        if source != target_col:
-            raise ValueError(f"P1 阶段 rolling 只能作用于 {target_col}，got source={source!r}")
+        _check_source(source, target_col, allowed_sources)
         window = raw.get("window")
         if not isinstance(window, int) or isinstance(window, bool) or not (2 <= window <= max_lag):
             raise ValueError(f"rolling window 必须是 2..{max_lag} 的整数，got {window!r}")
         stat = raw.get("stat")
         if stat not in ROLLING_STATS:
             raise ValueError(f"rolling stat 必须是 {sorted(ROLLING_STATS)}，got {stat!r}")
+        name = (
+            f"rolling_{stat}_{window}" if source == target_col
+            else f"{source}_rolling_{stat}_{window}"
+        )
         return {
-            "name": f"rolling_{stat}_{window}", "type": "rolling",
+            "name": name, "type": "rolling",
             "source": source, "window": window, "stat": stat,
             "min_periods": window,  # 强制窗口完整（incomplete_window 违规）
             "lookback_start": -window, "lookback_end": -1, "uses_current_target": False,
@@ -197,7 +238,8 @@ def snapshot(spec: List[dict]) -> List[dict]:
     return deepcopy(spec)
 
 
-def apply_actions(base_spec: List[dict], actions: List[dict]) -> List[dict]:
+def apply_actions(base_spec: List[dict], actions: List[dict],
+                  target_col: str = TARGET_COL, allowed_sources=None) -> List[dict]:
     """
     按序解释动作，返回新 spec 列表。任何非法动作抛 ValueError（候选作废）。
 
@@ -215,7 +257,8 @@ def apply_actions(base_spec: List[dict], actions: List[dict]) -> List[dict]:
             raise ValueError(f"未知动作类型 {atype!r}，允许: {sorted(ACTION_TYPES)}")
 
         if atype == "add_feature":
-            new_spec = normalize_spec(a["feature_spec"], spec)
+            new_spec = normalize_spec(a["feature_spec"], spec,
+                                      target_col=target_col, allowed_sources=allowed_sources)
             if new_spec["name"] in [s["name"] for s in spec]:
                 raise ValueError(
                     f"add_feature: 特征 {new_spec['name']} 已存在，不可重复添加")
@@ -233,7 +276,8 @@ def apply_actions(base_spec: List[dict], actions: List[dict]) -> List[dict]:
             names = [s["name"] for s in spec]
             if name not in names:
                 raise ValueError(f"replace_feature: 特征 {name!r} 不存在于当前特征集")
-            new_spec = normalize_spec(a["feature_spec"], spec)
+            new_spec = normalize_spec(a["feature_spec"], spec,
+                                      target_col=target_col, allowed_sources=allowed_sources)
             spec = [new_spec if s["name"] == name else s for s in spec]
 
         elif atype == "keep":
