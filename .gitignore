@@ -17,6 +17,7 @@ experiments/output/
 
 # 经验记忆运行时数据（源码 memory/memory_manager.py 仍入库）
 memory/experiment_memory.jsonl
+memory/strategies.jsonl
 
 # 数据
 GEFCom2014-L_V2/

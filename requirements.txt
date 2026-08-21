@@ -1,0 +1,32 @@
+# ============================================================
+# AutoML-Agent 依赖清单
+# Python 3.12+（当前测试环境 3.12.10）
+#
+# 安装：pip install -r requirements.txt
+# 版本为当前测试通过的版本（== 锁定可复现）；
+# 若需更宽松约束，可自行改为 >= 下限。
+# ============================================================
+
+# ---- 数据处理 / 数值计算 ----
+numpy==2.5.1                 # 数值数组与运算基础
+pandas==3.0.3                # 时间序列加载、特征构建（含 ACF 的 .autocorr）
+
+# ---- 机器学习基线 ----
+scikit-learn==1.9.0          # 预处理：StandardScaler / MinMaxScaler（import 名 sklearn）
+lightgbm==4.6.0              # LightGBM 梯度提升基线（产出特征重要性供 Agent 使用）
+
+# ---- 深度学习基线（LSTM / PatchTST） ----
+torch==2.13.0                # 默认安装为 CPU 版；如需 CUDA 请按官方渠道单独安装对应 wheel
+
+# ---- 可视化 ----
+matplotlib==3.11.0           # metrics 曲线、docs 配图
+
+# ---- LLM 调用（Agent 决策器） ----
+# QwenClient 通过 requests 直连 DashScope（OpenAI 兼容接口），无需 dashscope SDK。
+# 注意：当前 .venv 未装此包，跑真实 LLM（run_feature_agent.py 等非 --dry-run）前需补装。
+requests==2.33.1
+
+# ---- 文档 / 答辩材料生成（docs/figures/） ----
+# 生成 PPT 用，import 名为 pptx。仅 docs 配图脚本需要，跑模型/评测无需。
+# 注意：当前 .venv 未装此包。
+python-pptx==1.0.2
