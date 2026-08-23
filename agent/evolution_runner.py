@@ -37,7 +37,7 @@ from memory.memory_manager import (
     format_memories_for_llm,
     season_from_month,
 )
-from models.replay_backends import LightGBMBackend, ModelBackend
+from models.replay_backends import LightGBMBackend, ModelBackend, make_backend
 
 
 class EvolutionRunner:
@@ -95,6 +95,10 @@ class EvolutionRunner:
         self.best_rmse: float = float("inf")
         self.baseline_rmse: float = float("inf")
         self.best_round: int = 0
+        # 模型选择状态：当前模型与达到 best 的模型（从 backend_factory 推断初始名）
+        _probe = self.backend_factory()
+        self.current_model: str = getattr(_probe, "name", "lightgbm")
+        self.best_model: str = self.current_model
         self._current_result: Optional[Dict] = None   # 当前 best 的评测结果（画像/重要性）
         self._scenario: Optional[Scenario] = None
         self.round_records: List[Dict] = []
@@ -119,14 +123,15 @@ class EvolutionRunner:
     # ---------------------------------------------------------
     # 评测（带缓存）
     # ---------------------------------------------------------
-    def _evaluate(self, spec: List[dict]) -> Dict:
-        key = (self.task_id, feature_spec_hash(spec), self.protocol.name)
+    def _evaluate(self, spec: List[dict], model_name: Optional[str] = None) -> Dict:
+        model = model_name or self.current_model
+        key = (self.task_id, feature_spec_hash(spec), model, self.protocol.name)
         if key in self._eval_cache:
             return self._eval_cache[key]
         res = self.spec_evaluator(
             self.task_id, spec, self.protocol,
             val_hours=self.val_hours,
-            backend_factory=self.backend_factory,
+            backend_factory=lambda: make_backend(model),
             seed=self.seed,
             data_dir=self.data_dir,
         )
@@ -175,6 +180,7 @@ class EvolutionRunner:
             memories_text=memories_text,
             round_history_text=hist_text,
             max_lag=self.max_lag,
+            current_model=self.current_model,
         )
 
     # ---------------------------------------------------------
@@ -215,10 +221,12 @@ class EvolutionRunner:
         candidates: List[Dict] = []
         for c in parsed["candidates"]:
             acts = c["actions"]
+            model = c.get("model") or self.current_model
             base = {
                 "candidate_id": c["candidate_id"],
                 "hypothesis": c["hypothesis"],
                 "actions": acts,
+                "model": model,
             }
 
             if any(a.get("type") == "stop" for a in acts):
@@ -243,7 +251,7 @@ class EvolutionRunner:
                 })
                 continue
 
-            res = self._evaluate(cspec)
+            res = self._evaluate(cspec, model)
             candidates.append({
                 **base, "state": "evaluated", "spec": cspec, "res": res,
                 "base_spec": base_spec, "rollback_base": has_rollback,
@@ -273,19 +281,22 @@ class EvolutionRunner:
         delta = cand_rmse - before
 
         if cand_rmse < self.best_rmse - self.improvement_eps:
-            # 接受：更新 best 与 current
+            # 接受：更新 best 与 current（spec + model 同步）
             self.best_spec = snapshot(best_c["spec"])
             self.best_rmse = cand_rmse
             self.current_spec = snapshot(self.best_spec)
+            self.best_model = best_c.get("model", self.current_model)
+            self.current_model = self.best_model
             self.best_round = rnd
             self._current_result = best_c["res"]
             outcome = "improved"
-            note = f"[improved] {', '.join(a.get('type','?') for a in best_c['actions'])}"
+            note = f"[improved:{self.best_model}] {', '.join(a.get('type','?') for a in best_c['actions'])}"
         else:
-            # 自动回滚：current:=best（失败动作保留进 memory 作反例）
+            # 自动回滚：current:=best（spec + model 同步，失败动作保留进 memory 作反例）
             self.current_spec = snapshot(self.best_spec)
+            self.current_model = self.best_model
             outcome = "rolled_back"
-            note = f"[rolled_back] 最优候选 ΔRMSE {delta:+.4f}，回到 best={self.best_rmse:.4f}"
+            note = f"[rolled_back] 最优候选 ΔRMSE {delta:+.4f}，回到 best={self.best_rmse:.4f} ({self.best_model})"
 
         if verbose:
             rmse_list = ", ".join(f"C{c['candidate_id']}={c['res']['rmse']:.4f}" for c in evaled)
@@ -315,6 +326,7 @@ class EvolutionRunner:
             scenario=self._scenario or self._build_scenario(),
             problem={"worst_segment": worst, "bias": profile.bias},
             actions=best_c["actions"],
+            model=best_c.get("model", self.current_model),
             spec_before=best_c.get("base_spec", self.current_spec),
             spec_after=best_c.get("spec", self.current_spec),
             before_rmse=before,
@@ -337,7 +349,7 @@ class EvolutionRunner:
             print("=" * 60)
             print(f"EvolutionRunner — Task {self.task_id} 自进化特征工程")
             print(f"  协议: {self.protocol.name}  候选/轮: {self.n_candidates}  "
-                  f"最大轮: {self.max_iter}  模型: {self.backend_factory().name}")
+                  f"最大轮: {self.max_iter}  模型: {self.current_model}")
             print("=" * 60)
             print("Round 0: baseline 评测...")
 
@@ -425,6 +437,7 @@ class EvolutionRunner:
             "baseline_rmse": self.baseline_rmse,
             "best_rmse": self.best_rmse,
             "best_round": self.best_round,
+            "best_model": self.best_model,
             "baseline_spec": self.baseline_spec,
             "best_spec": self.best_spec,
             "current_spec": self.current_spec,

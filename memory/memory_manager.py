@@ -57,6 +57,7 @@ class ExperienceRecord:
     scenario: Scenario
     problem: dict                       # {"worst_segment": {...}, "bias": ...}
     actions: list                        # 本轮最优候选的动作集
+    model: Optional[str] = None          # 评测后端（lightgbm/lstm/...），模型选择 Agent 记录用
     spec_before: List[dict] = field(default_factory=list)
     spec_after: List[dict] = field(default_factory=list)
     before_rmse: float = 0.0

@@ -69,7 +69,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="GEFCom2014 Task 1-15 无泄漏滚动回放评测")
     parser.add_argument("--tasks", default="1:15", help="任务范围，如 1:15 / 1,3,5 / 1-5 / 1:15:2")
     parser.add_argument("--model", default="lightgbm",
-                        help="lightgbm | seasonal_naive_24 | seasonal_naive_168 | seasonal_naive_all | persistence")
+                        help="lightgbm | lstm | seasonal_naive_24 | seasonal_naive_168 | seasonal_naive_all | persistence")
     parser.add_argument("--protocol", default="online_h1",
                         help="online_h1 | recursive_month_ahead")
     parser.add_argument("--leak-check", default="sample", choices=["fast", "sample", "full"])

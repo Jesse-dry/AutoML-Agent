@@ -51,8 +51,9 @@ def _demo_script(n_candidates: int = 3):
              "actions": [{"type": "add_feature", "feature_spec": {"type": "lag", "source": "LOAD", "k": 48}}]},
             {"candidate_id": 2, "hypothesis": "补 48h 滚动标准差，刻画日间波动",
              "actions": [{"type": "add_feature", "feature_spec": {"type": "rolling", "source": "LOAD", "window": 48, "stat": "std"}}]},
-            {"candidate_id": 3, "hypothesis": "构造日周期-周周期交互（lag24 - lag168），强化跨周期差分",
-             "actions": [{"type": "add_feature", "feature_spec": {"type": "cross", "col1": "lag_24", "col2": "lag_168", "operation": "subtract"}}]},
+            {"candidate_id": 3, "hypothesis": "换 LSTM 后端评估同一特征集，验证模型选择维度",
+             "model": "lstm",
+             "actions": [{"type": "keep"}]},
         ],
         [
             {"candidate_id": 1, "hypothesis": "补 lag_72 覆盖更长滞后",
@@ -104,6 +105,7 @@ def _write_outputs(args, result, profile_text, outdir) -> None:
         "baseline_rmse": result["baseline_rmse"],
         "best_rmse": result["best_rmse"],
         "best_round": result["best_round"],
+        "best_model": result["best_model"],
         "n_evaluations": result["n_evaluations"],
         "best_features": [s["name"] for s in result["best_spec"]],
         "rounds": summary_rows,
@@ -152,7 +154,7 @@ def main() -> int:
     parser.add_argument("--n-candidates", type=int, default=3)
     parser.add_argument("--val-hours", type=int, default=168)
     parser.add_argument("--model", default="lightgbm",
-                        help="lightgbm | persistence | seasonal_naive_24 | seasonal_naive_168")
+                        help="lightgbm | lstm | persistence | seasonal_naive_24 | seasonal_naive_168")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--outdir", default=None)
     parser.add_argument("--memory-file", default=None, help="记忆文件路径（默认 memory/experiment_memory.jsonl）")
@@ -210,7 +212,8 @@ def main() -> int:
 
     print(f"\n{'=' * 60}")
     print(f"Baseline RMSE {result['baseline_rmse']:.4f} → Best RMSE {result['best_rmse']:.4f} "
-          f"({result['best_rmse'] - result['baseline_rmse']:+.4f}, round {result['best_round']})")
+          f"({result['best_rmse'] - result['baseline_rmse']:+.4f}, round {result['best_round']}, "
+          f"model={result['best_model']})")
     print(f"评测 spec 数: {result['n_evaluations']}  记忆文件: {memory.path}")
 
     _write_outputs(args, result, profile_text, outdir)
