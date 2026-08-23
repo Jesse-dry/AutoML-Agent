@@ -10,6 +10,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from agent.energy_registry import get_energy
 from agent.feature_agent import _extract_json
 from agent.feature_spec import ACTION_TYPES
 from data.task_builder import MAX_LAG
@@ -109,19 +110,8 @@ class EvolutionContext:
 
 
 def _domain_knowledge(energy: str, target_col: str) -> str:
-    """能源赛道领域知识（注入 system prompt 的角色定位与建模要点）。"""
-    if energy == "wind":
-        return (
-            f"你是**风电出力预测**的特征工程决策 Agent。目标列 {target_col} 为归一化风电出力 [0,1]。\n"
-            "风电特性：随机性强、天气驱动、非平稳；出力随风速非线性上升，存在爬坡事件\n"
-            "（短时大幅变化），日/周周期弱于负荷。外生气象预报（ws10/ws100 等）在决策时点\n"
-            "可得，是最重要的特征来源；注意训练侧用历史实际天气、预测侧用气象预报，\n"
-            "存在 train/serve 分布偏移，Agent 应感知这一风险。"
-        )
-    return (
-        f"你是**电力负荷预测**的特征工程决策 Agent。目标列 {target_col} 为电力负荷。\n"
-        "负荷特性：日/周周期强、规律明显；工作日/周末差异大；晚峰低谷是主要误差来源。"
-    )
+    """能源赛道领域知识（查注册表，target_col 参数保留兼容）。"""
+    return get_energy(energy).domain
 
 
 def _spec_help(max_lag: int, target_col: str, exogenous_sources: List[str]) -> str:

@@ -18,6 +18,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from agent.energy_registry import get_energy
 from agent.feature_agent import _extract_json
 from agent.feature_spec import snapshot, validate_spec_list
 from data.task_builder import FEATURE_SPEC, MAX_LAG
@@ -190,7 +191,7 @@ def build_migration_messages(task_id: int, drift: DriftReport,
                              scenario: Optional[Scenario] = None,
                              memory: Optional[MemoryManager] = None,
                              energy: str = "load") -> List[Dict]:
-    domain = "风电出力预测" if energy == "wind" else "电力负荷预测"
+    domain = get_energy(energy).label
     system = (
         f"你是{domain} AutoML 系统的跨 Task 策略迁移决策器。\n"
         "任务：根据数据漂移报告与历史策略，决定下一个预测月（Task）的特征工程策略：\n"

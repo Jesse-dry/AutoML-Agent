@@ -22,14 +22,12 @@ from agent.evolution_schema import (
     format_round_history,
     parse_llm_v2,
 )
+from agent.energy_registry import get_energy
 from agent.feature_agent import compute_acf_summary
 from agent.feature_spec import apply_actions, snapshot, validate_spec_list
-from data.availability import available_history
-from data.gefcom_loader import GEFCOM_DATA_DIR
-from data.task_builder import FEATURE_SPEC, TARGET_COL, feature_spec_hash
+from data.task_builder import feature_spec_hash
 from evaluation.error_profiler import format_profile_for_llm
 from evaluation.forecast_protocol import ForecastProtocol, ONLINE_H1
-from evaluation.spec_evaluator import evaluate_spec
 from memory.memory_manager import (
     ExperienceRecord,
     MemoryManager,
@@ -82,34 +80,17 @@ class EvolutionRunner:
         self.seed = seed
         self.max_lag = int(max_lag)
 
-        # energy/track 资源解析（Load 默认保持现状，Wind 切换并行件）
-        if energy == "wind":
-            from data.wind_loader import (
-                WIND_DATA_DIR,
-                WIND_TARGET_COL,
-                wind_available_history,
-            )
-            from data.wind_task_builder import (
-                WIND_FEATURE_SPEC,
-                WIND_WEATHER_DERIVED_COLS,
-            )
-            from evaluation.spec_evaluator import evaluate_wind_spec
-
-            self.target_col = WIND_TARGET_COL
-            self._base_spec = snapshot(WIND_FEATURE_SPEC)
-            self._default_data_dir = WIND_DATA_DIR
-            self._availability_fn = wind_available_history
-            self._default_spec_evaluator = evaluate_wind_spec
-            self.allowed_sources = {WIND_TARGET_COL, *WIND_WEATHER_DERIVED_COLS}
-            self._default_dataset_name = f"GEFCom2014-W Task {task_id} Zone {zone}"
-        else:
-            self.target_col = TARGET_COL
-            self._base_spec = snapshot(FEATURE_SPEC)
-            self._default_data_dir = GEFCOM_DATA_DIR
-            self._availability_fn = available_history
-            self._default_spec_evaluator = evaluate_spec
-            self.allowed_sources = {TARGET_COL}
-            self._default_dataset_name = f"GEFCom2014 Task {task_id}"
+        # energy/track 资源解析（查注册表；接入新赛道 = 加一行配置，不改此段）
+        es = get_energy(energy)
+        self.target_col = es.target_col
+        self._base_spec = snapshot(es.base_spec)
+        self._default_data_dir = es.data_dir
+        self._availability_fn = es.availability_fn
+        self._default_spec_evaluator = es.spec_evaluator
+        self.allowed_sources = set(es.allowed_sources)
+        self.zones = es.zones
+        zone_suffix = f" Zone {zone}" if zone is not None else ""
+        self._default_dataset_name = f"{es.dataset_label} Task {task_id}{zone_suffix}"
 
         self.data_dir = data_dir or self._default_data_dir
         self.dataset_name = dataset_name or self._default_dataset_name
@@ -142,10 +123,7 @@ class EvolutionRunner:
     # 场景
     # ---------------------------------------------------------
     def _build_scenario(self) -> Scenario:
-        if self.energy == "wind":
-            av = self._availability_fn(self.task_id, self.zone, self.data_dir)
-        else:
-            av = self._availability_fn(self.task_id, self.data_dir)
+        av = self._availability_fn(self.task_id, self.zone, self.data_dir)
         target = av.history_df[self.target_col].dropna()
         cv = float(target.std() / target.mean()) if target.mean() != 0 else 0.0
         acf = compute_acf_summary(av.history_df, self.target_col, lags=[24, 168])
@@ -167,22 +145,13 @@ class EvolutionRunner:
         if key in self._eval_cache:
             return self._eval_cache[key]
         factory = lambda: make_backend(model)
-        if self.energy == "wind":
-            res = self.spec_evaluator(
-                self.task_id, self.zone, spec, self.protocol,
-                val_hours=self.val_hours,
-                backend_factory=factory,
-                seed=self.seed,
-                data_dir=self.data_dir,
-            )
-        else:
-            res = self.spec_evaluator(
-                self.task_id, spec, self.protocol,
-                val_hours=self.val_hours,
-                backend_factory=factory,
-                seed=self.seed,
-                data_dir=self.data_dir,
-            )
+        res = self.spec_evaluator(
+            self.task_id, self.zone, spec, self.protocol,
+            val_hours=self.val_hours,
+            backend_factory=factory,
+            seed=self.seed,
+            data_dir=self.data_dir,
+        )
         self._eval_cache[key] = res
         return res
 

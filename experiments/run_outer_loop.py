@@ -28,13 +28,12 @@ from typing import Dict, List, Optional
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from agent.energy_registry import get_energy  # noqa: E402
 from agent.evolution_runner import EvolutionRunner  # noqa: E402
 from agent.feature_agent import QwenClient  # noqa: E402
 from agent.feature_spec import snapshot  # noqa: E402
 from agent.scripted_llm import ScriptedLLM  # noqa: E402
 from agent.strategy_migration import MigrationPlanner  # noqa: E402
-from data.availability import available_history  # noqa: E402
-from data.task_builder import FEATURE_SPEC, TARGET_COL  # noqa: E402
 from evaluation.drift_detector import (  # noqa: E402
     TaskStats,
     compute_scenario,
@@ -43,7 +42,6 @@ from evaluation.drift_detector import (  # noqa: E402
     format_drift_for_llm,
 )
 from evaluation.forecast_protocol import get_protocol  # noqa: E402
-from evaluation.spec_evaluator import evaluate_spec  # noqa: E402
 from memory.memory_manager import MemoryManager, StrategyRecord  # noqa: E402
 from models.replay_backends import make_backend  # noqa: E402
 from run_self_evolving_agent import _demo_script  # noqa: E402
@@ -85,24 +83,14 @@ def run_outer_loop(args) -> List[Dict]:
     protocol = get_protocol(args.protocol)
     backend_factory = lambda: make_backend(args.model)  # noqa: E731
 
-    # energy/track 资源解析（Load 默认；Wind 切换并行件，单分区跨月滚动）
+    # energy/track 资源解析（查注册表，接入新赛道 = 加一行配置）
     energy = args.energy
-    if energy == "wind":
-        from data.wind_loader import WIND_DATA_DIR, WIND_TARGET_COL, wind_available_history
-        from data.wind_task_builder import WIND_FEATURE_SPEC
-        from evaluation.spec_evaluator import evaluate_wind_spec
-
-        target_col = WIND_TARGET_COL
-        base_spec = WIND_FEATURE_SPEC
-        availability_fn = wind_available_history
-        ref_evaluator = evaluate_wind_spec
-        zone = args.zone
-    else:
-        target_col = TARGET_COL
-        base_spec = FEATURE_SPEC
-        availability_fn = available_history
-        ref_evaluator = evaluate_spec
-        zone = None
+    es = get_energy(energy)
+    target_col = es.target_col
+    base_spec = es.base_spec
+    availability_fn = es.availability_fn
+    ref_evaluator = es.spec_evaluator
+    zone = args.zone if es.zones else None
 
     outdir = Path(args.outdir) if args.outdir else (
         PROJECT_ROOT / "experiments" / "output"
@@ -135,10 +123,7 @@ def run_outer_loop(args) -> List[Dict]:
 
     for tid in tasks:
         print(f"\n{'=' * 70}\nTask {tid} / {tasks[-1]}\n{'=' * 70}")
-        if energy == "wind":
-            av = availability_fn(tid, zone)
-        else:
-            av = availability_fn(tid)
+        av = availability_fn(tid, zone)
         stats_cur = compute_task_stats(av.history_df, task_id=tid, target_col=target_col)
         scenario = compute_scenario(av.history_df, av.forecast_ts, task_id=tid,
                                     target_col=target_col, energy=energy)
@@ -189,14 +174,9 @@ def run_outer_loop(args) -> List[Dict]:
         # ---- 参考基线（可选）：基础特征集在该 Task 的 RMSE ----
         ref_rmse = None
         if args.with_reference_baseline:
-            if energy == "wind":
-                ref = ref_evaluator(tid, zone, snapshot(base_spec), protocol,
-                                    val_hours=args.val_hours,
-                                    backend_factory=backend_factory, seed=args.seed)
-            else:
-                ref = ref_evaluator(tid, snapshot(base_spec), protocol,
-                                    val_hours=args.val_hours,
-                                    backend_factory=backend_factory, seed=args.seed)
+            ref = ref_evaluator(tid, zone, snapshot(base_spec), protocol,
+                                val_hours=args.val_hours,
+                                backend_factory=backend_factory, seed=args.seed)
             ref_rmse = float(ref["rmse"])
             print(f"  参考基线 FEATURE_SPEC RMSE = {ref_rmse:.4f}")
 
