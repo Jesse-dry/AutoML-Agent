@@ -30,6 +30,21 @@ ROLLING_STATS = {"mean", "std", "var", "max", "min", "median", "sum", "skew", "k
 CROSS_OPS = {"add", "subtract", "multiply", "divide"}
 _OP_WORDS = {"add": "plus", "subtract": "minus", "multiply": "multiply", "divide": "div"}
 
+# cross operation 的容错别名（LLM 常用缩写 → 合法值），降低非法 operation 导致的 retry
+_OP_ALIASES = {
+    "add": "add", "plus": "add", "sum": "add",
+    "subtract": "subtract", "minus": "subtract", "sub": "subtract", "diff": "subtract",
+    "multiply": "multiply", "mul": "multiply", "times": "multiply", "product": "multiply",
+    "divide": "divide", "div": "divide", "ratio": "divide",
+}
+
+
+def _normalize_cross_op(op) -> str:
+    """把 LLM 常见的 operation 缩写/别名映射到合法值（非字符串原样返回，供后续报错）。"""
+    if not isinstance(op, str):
+        return op
+    return _OP_ALIASES.get(op.strip().lower(), op)
+
 ACTION_TYPES = {
     "add_feature", "remove_feature", "replace_feature",
     "keep", "rollback", "stop",
@@ -123,9 +138,9 @@ def normalize_spec(
 
     # cross
     col1, col2 = raw.get("col1"), raw.get("col2")
-    op = raw.get("operation")
+    op = _normalize_cross_op(raw.get("operation"))
     if op not in CROSS_OPS:
-        raise ValueError(f"cross operation 必须是 {sorted(CROSS_OPS)}，got {op!r}")
+        raise ValueError(f"cross operation 必须是 {sorted(CROSS_OPS)}，got {raw.get('operation')!r}")
     existing_names = [s.get("name") for s in existing_specs]
     for c in (col1, col2):
         if c not in existing_names:

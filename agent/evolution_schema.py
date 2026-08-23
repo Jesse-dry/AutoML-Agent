@@ -114,7 +114,8 @@ def _spec_help(max_lag: int) -> str:
 2. lag    {{"type":"lag",   "source":"LOAD", "k":1..{max_lag}}}          # 只允许滞后 LOAD
 3. rolling{{"type":"rolling","source":"LOAD", "window":2..{max_lag}, "stat":"mean|std|var|max|min|median|sum|skew|kurt"}}
 4. cross  {{"type":"cross", "col1":"已有特征名", "col2":"已有特征名", "operation":"add|subtract|multiply|divide"}}
-   - cross 的 col1/col2 必须是**当前特征集里已存在**的特征（建议 lag / rolling / time），
+   - operation 只能写 add / subtract / multiply / divide 这四个词之一，**不要用 mul/div/minus 等缩写**
+   - col1/col2 必须**非空**，且是「当前特征列表」里出现过的**确切名字**（如 lag_24），
      禁止直接用 LOAD；若想用某特征做交叉，先在同一候选里 add 它。
 
 动作类型：
