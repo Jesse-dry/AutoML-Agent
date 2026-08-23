@@ -41,9 +41,55 @@ def _git_commit() -> str:
         return "unknown"
 
 
-def _demo_script(n_candidates: int = 3):
+def _wind_demo_script(n_candidates: int = 3):
+    """--dry-run 的 Wind 确定性演示脚本（source 用 TARGETVAR / 气象外生列）。"""
+    import json as _json
+
+    rounds = [
+        [
+            {"candidate_id": 1, "hypothesis": "补中程目标滞后 lag_48，加强出力惯性",
+             "actions": [{"type": "add_feature", "feature_spec": {"type": "lag", "source": "TARGETVAR", "k": 48}}]},
+            {"candidate_id": 2, "hypothesis": "补 48h 风速滚动标准差，刻画风资源波动",
+             "actions": [{"type": "add_feature", "feature_spec": {"type": "rolling", "source": "ws100", "window": 48, "stat": "std"}}]},
+            {"candidate_id": 3, "hypothesis": "补 72h 风速滞后，捕捉天气系统演变",
+             "actions": [{"type": "add_feature", "feature_spec": {"type": "lag", "source": "ws100", "k": 72}}]},
+        ],
+        [
+            {"candidate_id": 1, "hypothesis": "补目标 lag_72 覆盖更长惯性",
+             "actions": [{"type": "add_feature", "feature_spec": {"type": "lag", "source": "TARGETVAR", "k": 72}}]},
+            {"candidate_id": 2, "hypothesis": "移除低信息量的 ws10_lag_24 试探",
+             "actions": [{"type": "remove_feature", "feature": "ws10_lag_24"}]},
+            {"candidate_id": 3, "hypothesis": "加当前小时风速预报 ws100@t（决策时点可得，试探 train/serve 偏移收益）",
+             "actions": [{"type": "add_feature", "feature_spec": {"type": "current", "source": "ws100"}}]},
+        ],
+        [
+            {"candidate_id": 1, "hypothesis": "补目标 lag_120 试探更长惯性",
+             "actions": [{"type": "add_feature", "feature_spec": {"type": "lag", "source": "TARGETVAR", "k": 120}}]},
+            {"candidate_id": 2, "hypothesis": "补 168h 目标滚动标准差",
+             "actions": [{"type": "add_feature", "feature_spec": {"type": "rolling", "source": "TARGETVAR", "window": 168, "stat": "std"}}]},
+            {"candidate_id": 3, "hypothesis": "保持当前特征集收敛探测",
+             "actions": [{"type": "keep"}]},
+        ],
+    ]
+
+    def _script(round_no: int) -> str:
+        idx = min(round_no - 1, len(rounds) - 1)
+        payload = {
+            "round": round_no,
+            "analysis": "[DRY RUN] Wind 演示脚本：生成多个不同方向候选。",
+            "candidates": rounds[idx][:n_candidates],
+        }
+        return _json.dumps(payload, ensure_ascii=False)
+
+    return _script
+
+
+def _demo_script(n_candidates: int = 3, energy: str = "load"):
     """--dry-run 的确定性演示脚本：每轮 n_candidates 个不同方向的候选。"""
     import json as _json
+
+    if energy == "wind":
+        return _wind_demo_script(n_candidates)
 
     rounds = [
         [
@@ -148,6 +194,9 @@ def _write_outputs(args, result, profile_text, outdir) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="P1-A 自进化特征工程 Agent")
     parser.add_argument("--task", type=int, default=1, help="GEFCom Task 1..15")
+    parser.add_argument("--energy", default="load", choices=["load", "wind"],
+                        help="能源赛道：load（负荷）| wind（风电）")
+    parser.add_argument("--zone", type=int, default=1, help="Wind 分区 1..10（energy=wind 时生效）")
     parser.add_argument("--max-iter", type=int, default=5)
     parser.add_argument("--dry-run", action="store_true", help="用 ScriptedLLM 演示脚本")
     parser.add_argument("--protocol", default="online_h1", choices=["online_h1", "recursive_month_ahead"])
@@ -164,19 +213,26 @@ def main() -> int:
     if not (1 <= args.task <= 15):
         print(f"[ERROR] task 必须在 1..15", file=sys.stderr)
         return 1
+    if args.energy == "wind" and not (1 <= args.zone <= 10):
+        print(f"[ERROR] zone 必须在 1..10", file=sys.stderr)
+        return 1
     if not (1 <= args.n_candidates <= 3):
         print(f"[ERROR] n_candidates 必须在 1..3", file=sys.stderr)
         return 1
 
+    if args.energy == "wind":
+        outdir_suffix = f"evolution_wind_task{args.task}_z{args.zone}"
+    else:
+        outdir_suffix = f"evolution_task{args.task}"
     outdir = Path(args.outdir) if args.outdir else (
-        PROJECT_ROOT / "experiments" / "output" / f"evolution_task{args.task}"
+        PROJECT_ROOT / "experiments" / "output" / outdir_suffix
     )
     memory = MemoryManager(Path(args.memory_file)) if args.memory_file else MemoryManager()
 
     # LLM 客户端
     if args.dry_run:
-        llm_client = ScriptedLLM(_demo_script(args.n_candidates))
-        print(f"模式: DRY RUN（ScriptedLLM）  Task: {args.task}  协议: {args.protocol}")
+        llm_client = ScriptedLLM(_demo_script(args.n_candidates, args.energy))
+        print(f"模式: DRY RUN（ScriptedLLM）  Task: {args.task}  energy={args.energy}  协议: {args.protocol}")
     else:
         try:
             llm_client = QwenClient()
@@ -196,7 +252,8 @@ def main() -> int:
         val_hours=args.val_hours,
         seed=args.seed,
         max_lag=args.max_lag,
-        dataset_name=f"GEFCom2014 Task {args.task}",
+        energy=args.energy,
+        zone=args.zone,
     )
 
     try:

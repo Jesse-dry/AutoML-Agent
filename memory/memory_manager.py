@@ -47,6 +47,7 @@ class Scenario:
     acf_24: float
     acf_168: float
     load_cv: float
+    energy: str = "load"                # 能源赛道（load | wind），跨能源不参与检索
 
 
 @dataclass
@@ -58,6 +59,7 @@ class ExperienceRecord:
     problem: dict                       # {"worst_segment": {...}, "bias": ...}
     actions: list                        # 本轮最优候选的动作集
     model: Optional[str] = None          # 评测后端（lightgbm/lstm/...），模型选择 Agent 记录用
+    energy: str = "load"                 # 能源赛道（load | wind），跨能源不参与检索
     spec_before: List[dict] = field(default_factory=list)
     spec_after: List[dict] = field(default_factory=list)
     before_rmse: float = 0.0
@@ -78,6 +80,7 @@ class StrategyRecord:
     - transfer_gap：继承策略在本 Task 的 RMSE 相对变化（残余漂移的直接度量）
     """
     task_id: int
+    energy: str = "load"                 # 能源赛道（load | wind），跨能源不参与检索
     spec: List[dict] = field(default_factory=list)
     rmse: float = 0.0
     scenario: Scenario = None            # type: ignore[assignment]
@@ -170,6 +173,11 @@ class MemoryManager:
         if not recs:
             return []
 
+        # 跨能源隔离：只检索同能源赛道的经验（防 Load 经验污染 Wind）
+        recs = [r for r in recs if r.energy == scenario.energy]
+        if not recs:
+            return []
+
         # 数值维度归一化参考界
         cv_max = max(0.5, max((r.scenario.load_cv for r in recs), default=0.5))
 
@@ -216,6 +224,11 @@ class MemoryManager:
     def retrieve_strategies(self, scenario: Scenario, top_k: int = 3,
                             min_sim: float = 0.0) -> List[StrategyRecord]:
         recs = self.load_strategies()
+        if not recs:
+            return []
+
+        # 跨能源隔离：只检索同能源赛道的策略
+        recs = [r for r in recs if r.energy == scenario.energy]
         if not recs:
             return []
 
