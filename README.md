@@ -9,7 +9,9 @@ LLM 驱动的 AutoML Agent —— 面向**多能源时序预测**（负荷 / 风
 数据集：
 - [GEFCom2014-L_V2](https://www.sciencedirect.com/journal/international-journal-of-forecasting/vol/30/issue/2)（负荷赛道，15 任务）—— 主论文核心
 - GEFCom2014-W_v2（风电赛道，15 Task × 10 Zone）—— ✅ 已接入（无泄漏滚动回放，LightGBM 基线 Mean RMSE 0.0998）
+- GEFCom2014-S_v2（光伏赛道，15 Task × 3 Zone）—— ✅ 已接入（无泄漏滚动回放，LightGBM 基线 Mean RMSE 0.0636）
 - GEFCom2014-P_V2（电价赛道，15 任务，单分区）—— **决策效能评估主线（价值出口）**：储能套利评估器把预测误差货币化为利润 / Regret（P-Value）
+- ECL（ElectricityLoadDiagrams，321 用户）—— ✅ 已接入（**跨用户迁移**范式，PatchTST 迁移 Median RMSE 67.5）
 
 > **演进方向**：从「负荷预测」扩展为「多能源自主智能体」，最终以**决策价值**为价值出口 ——
 > 预测不止于「准」，更在于「有用」。详见 [ROADMAP.md](ROADMAP.md)（V2.1 三层架构）。
@@ -100,6 +102,10 @@ AutoML-Agent/
 │   ├── task_builder.py                  # 血缘式特征规格 + 严格过去向特征构造（lag/rolling/time/cross）+ GEFComTask
 │   ├── wind_loader.py                   # ★Wind 加载器（15 Task × 10 Zone：train/expvars/benchmark/solution + 真值解析）
 │   ├── wind_task_builder.py             # ★Wind 特征规格（气象外生 U/V→风速/风向）+ WindTask 构建
+│   ├── solar_loader.py                  # ★Solar 加载器（15 Task × 3 Zone：train/predictors/benchmark + 真值解析）
+│   ├── solar_task_builder.py            # ★Solar 特征规格（气象外生 VAR169/164/167 + 血缘式）+ SolarTask 构建
+│   ├── ecl_loader.py                    # ★ECL 加载器（321 用户负荷矩阵 + 随机划分 train/test 用户）
+│   ├── ecl_task_builder.py              # ★ECL 迁移任务构建（用户无关模型 + 复用 build_features）
 │   └── price_loader.py                  # (TODO) Price 电价加载器（P-Value：决策效能主线）
 │
 ├── evaluation/                          # 无泄漏滚动回放评测体系
@@ -112,6 +118,9 @@ AutoML-Agent/
 │   ├── drift_detector.py                # ★跨 Task 漂移检测（尾部窗口均值/方差/分位/ACF/残余误差 → score/level）
 │   ├── task_replay.py                   # Task 1–15 回放主循环 + 审计输出（predictions/run_manifest）
 │   ├── wind_replay.py                   # ★Wind 回放主循环（15 Task × 10 Zone 逐分区独立模型 + 气象外生特征）
+│   ├── solar_replay.py                  # ★Solar 回放主循环（15 Task × 3 Zone 逐分区独立模型 + 气象外生特征）
+│   ├── ecl_replay.py                    # ★ECL 跨用户迁移评测（统一时间切分协议 + per-user 相对指标）
+│   ├── ecl_protocol.py                  # ★ECL 统一评测协议（Train<2014-06 / Val 06~07 / Test 07~12 + 汇总审计）
 │   └── arbitrage_evaluator.py           # (TODO) 储能套利评估器（LP + Regret，P-Value 价值出口）
 │
 ├── models/
@@ -122,6 +131,7 @@ AutoML-Agent/
 │   │   └── LSTM_baseline.py             # LSTM 基线（滑动窗口 + 归一化 + 早停）
 │   ├── PatchTST/
 │   │   ├── patch_tst_baseline.py        # PatchTST 训练脚本 (ICLR 2023)
+│   │   ├── ecl_patchtst_migration.py    # ★PatchTST 跨用户迁移（ECL：单通道 + RevIN + 统一协议）
 │   │   ├── PatchTST_backbone.py         # Patching + Channel-Independent Transformer
 │   │   ├── PatchTST_layers.py           # 自定义 Transformer 层
 │   │   └── RevIN.py                     # 可逆实例归一化
@@ -151,6 +161,8 @@ AutoML-Agent/
 │   ├── run_outer_loop.py                # ★外循环（P1-B）：逐 Task 漂移检测 → 策略迁移 → warm-start 自进化（CLI）
 │   ├── run_task_replay.py               # Task 1–15 无泄漏滚动回放评测（CLI）
 │   ├── run_wind_replay.py               # ★Wind Task 1–15 × Zone 1–10 无泄漏滚动回放评测（CLI）
+│   ├── run_solar_replay.py              # ★Solar Task 1–15 × Zone 1–3 无泄漏滚动回放评测（CLI）
+│   ├── run_ecl_replay.py                # ★ECL 跨用户迁移评测（CLI：LightGBM / persistence，统一协议）
 │   ├── run_price_replay.py              # (TODO) Price Task 1–15 无泄漏滚动回放评测（CLI，P-Value）
 │   ├── run_feature_agent.py             # v1 特征工程 Agent 实验（legacy）
 │   ├── feature_agent_task15/            # Task 15 v1 实验输出
@@ -158,7 +170,10 @@ AutoML-Agent/
 │
 ├── tests/
 │   ├── test_evaluation_suite.py         # 评测体系测试（T1–T6）
-│   └── test_evolution_suite.py          # ★自进化 Agent 测试（E1–E16，E6 复现回滚 + E14 漂移 + E15 迁移 + E16 外循环）
+│   ├── test_evolution_suite.py          # ★自进化 Agent 测试（E1–E16，E6 复现回滚 + E14 漂移 + E15 迁移 + E16 外循环）
+│   ├── test_wind_suite.py               # ★Wind 接入测试（W1–W6）
+│   ├── test_solar_suite.py              # ★Solar 接入测试（S1–S6）
+│   └── test_ecl_suite.py                # ★ECL 接入测试（E1–E6：loader/切分/构建/泄漏/冒烟）
 │
 └── GEFCom2014-L_V2/                     # 数据集 (gitignored)
 ```
@@ -282,6 +297,82 @@ python experiments/run_wind_replay.py --tasks 1:3 --zones 1:3 --model lightgbm -
 
 > **Wind 基线**（LightGBM，online_h1）：Mean RMSE **0.0998**（归一化 [0,1] 量纲），Mean R² 0.873，
 > 优于 persistence（对比见下文），验证风电天气驱动场景下气象外生特征有效。
+
+### 3.2 Solar 光伏赛道滚动回放（P0）
+
+光伏赛道（`GEFCom2014-S_v2/`）：15 Task × 3 Zone，预测月逐月推进（Task1=2013-04 … Task15=2014-06）。
+目标为归一化出力 `POWER` [0,1]，特征含**气象外生**（`predictors{k}.csv` 的 VAR169=SSRD 太阳辐射 /
+VAR164=云量 / VAR167=温度，覆盖完整历史 + 预测月，决策时点可得）。逐分区独立模型，Task 得分 = 3 分区指标均值。
+
+```bash
+# 全量 1:15 × 3 Zone 回放（LightGBM / persistence）
+python experiments/run_solar_replay.py --tasks 1:15 --model lightgbm
+python experiments/run_solar_replay.py --tasks 1:15 --model persistence
+# 指定分区 / 任务
+python experiments/run_solar_replay.py --tasks 1:3 --zones 1:3 --model lightgbm
+```
+
+产出（`experiments/output/solar_replay/`）：
+- 逐 Task（Zone 均值）RMSE 表 + **Mean / Std / Worst**；`detail_summary_*.csv` 逐 Task×Zone 明细
+- `predictions/task_{01..15}_zone_{01..03}.csv` — 逐小时 `y_true / y_pred / error`
+- `run_manifest.json` — 数据集 / zones / 特征血缘哈希 / seed / git_commit 审计
+
+> **Solar 基线**（LightGBM，online_h1）：Mean RMSE **0.0636**（归一化 [0,1] 量纲），Mean R² 0.93，
+> 优于 Wind（0.0998）——光伏"夜间恒 0 + 太阳辐射驱动"规律性比风电强。
+> ⚠️ 光伏夜间出力 0，MAPE 会爆炸（400%+），只看 RMSE/MAE/R²。
+>
+> **实现注意**：Solar 时间戳存在**时区偏移**（发电峰值在时间戳 hour 0~3，而非本地正午），
+> 但 hour/lag 特征不受影响（模型自动学习该映射）。
+
+### 3.3 ECL 跨用户迁移评测（Exp 4）
+
+ECL（ElectricityLoadDiagrams20112014，`ECL/electricity.txt`）是居民用电负荷数据（321 用户，2012–2014，
+小时级）。与 GEFCom 四赛道的"滚动回放"不同，ECL 是 **跨用户迁移**：
+随机划分 **260 train / 61 test 用户**（固定 seed=42），train 用户训练一个**用户无关模型**，
+test 用户（训练时从未见过）预测低频段，验证"电力用户经验迁移"。
+
+**统一评测协议**（`evaluation/ecl_protocol.py`，保证各模型可比）：
+
+| 集合 | 用户 | 目标时间范围 | 用途 |
+|---|---|---|---|
+| Train | 260 train 用户 | `< 2014-06-01` | 参数拟合 |
+| Validation | 同一批 train 用户 | `2014-06-01 ~ 2014-07-01` | 早停 / 模型选择 |
+| Test | 61 test 用户 | `2014-07-01 ~ 2014-12-31` | 最终迁移评估 |
+
+指标：逐用户 RMSE + **相对指标**（模型误差 / persistence=lag_1、seasonal naive=lag_24，
+量纲抵消、跨用户可比，`<1` = 模型更优）。
+
+```bash
+# LightGBM / persistence 迁移基线（统一协议）
+python experiments/run_ecl_replay.py --model lightgbm
+python experiments/run_ecl_replay.py --model persistence
+
+# PatchTST 迁移（RevIN 单通道，260 户 2.5 年训练，严格时间切分验证）
+python models/PatchTST/ecl_patchtst_migration.py --n-train 260 --epochs 25
+
+# 接入测试（E1–E6：loader/切分/构建/泄漏/冒烟）
+python tests/test_ecl_suite.py
+```
+
+产出（`experiments/output/ecl_replay/{lightgbm,persistence}/` 与 `ecl_patchtst/<run_id>/`）：
+- `run_manifest.json` — git SHA / 参数 / 用户列表哈希 / 时间边界（审计）
+- `metrics_summary.json` — 统一口径汇总（mean/median/std RMSE + ratio 未截断浮点值）
+- `per_user_metrics.csv` — 逐用户 model/persistence/snaive RMSE + ratio
+- `predictions.csv` — 逐用户逐小时 actual/prediction/persistence/snaive
+- PatchTST 额外输出 `training_history.csv` + `best_model.pt`
+
+**ECL 迁移基线**（61 test 用户，统一协议）：
+
+| Model | Mean RMSE | Median RMSE | Ratio vs lag_1 | pct_better(lag_1) | Ratio vs lag_24 | pct_better(lag_24) |
+|---|--:|--:|--:|--:|--:|--:|
+| Persistence | 247.5 | 103.8 | 1.000 | — | 1.117 | 36.1% |
+| LightGBM（用户无关） | 233.5 | 146.7 | 1.331 | 42.6% | 1.087 | 42.6% |
+| **PatchTST** | **135.7** | **67.5** | **0.601** | **93.4%** | **0.687** | **100%** |
+
+> **结论**：朴素"用户无关模型 + 手工特征"（LightGBM）治不了居民用电差异极大（用户规模差 140 倍），
+> 大多数用户不如"抄上一小时"。而 **PatchTST（channel-independence + RevIN）** 逐序列归一化、
+> 共享权重学用户无关规律，**93.4% 未见用户赢过 persistence、100% 赢过 seasonal naive**——
+> 这是"时序经验迁移有效"（Exp 4）的核心证据。LightGBM 基线作为 Agent 的对照基准。
 
 ### 4. 运行自进化 Agent（P1-A）
 
@@ -643,5 +734,8 @@ df_new, added_cols, skipped = execute_features_from_llm(df, validated)
 - [ ] 报告生成 Agent (`agent/report_agent.py`)
 - [ ] Transformer 基线模型 (`models/Transformer/`)
 - [x] ~~多能源扩展 · Wind 数据接入 + 基线回放（`data/wind_loader.py` / `wind_task_builder.py` / `evaluation/wind_replay.py` / `run_wind_replay.py`）~~
-- [ ] 多能源扩展 · Wind 自进化 Agent 泛化 / 多专家协同（V3.0）
+- [x] ~~多能源扩展 · Solar 数据接入 + 基线回放（`data/solar_loader.py` / `solar_task_builder.py` / `evaluation/solar_replay.py` / `run_solar_replay.py`，RMSE 0.0636）~~
+- [x] ~~ECL 跨用户迁移接入（Exp 4：`data/ecl_loader.py` / `ecl_task_builder.py` / `evaluation/ecl_replay.py` / `run_ecl_replay.py`，LightGBM 迁移基线）~~
+- [x] ~~ECL PatchTST 跨用户迁移（`models/PatchTST/ecl_patchtst_migration.py`，RevIN 单通道 + 统一评测协议，93.4% 用户优于 persistence）~~
+- [ ] 多能源扩展 · Wind / Solar 自进化 Agent 泛化 / 多专家协同（V3.0）
 - [ ] 多能源扩展 · Price 决策效能主线（P-Value：`price_loader` + 储能套利评估器 + 尖峰双层，见 ROADMAP）
