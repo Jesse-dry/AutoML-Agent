@@ -145,6 +145,10 @@ def run_outer_loop(args) -> List[Dict]:
         # ---- 迁移决策（LLM 或确定性兜底） ----
         decision = planner.plan(tid, drift=drift, prev_strategy=prev_strategy,
                                 scenario=scenario)
+        # CLI override is intended for bounded/reproducible runs. Keep the
+        # LLM's policy and init_spec, but honor an explicit iteration budget.
+        if args.max_iter > 0:
+            decision.max_iter = args.max_iter
         print(f"  迁移: policy={decision.policy} max_iter={decision.max_iter} "
               f"init_features={len(decision.init_spec)} source={decision.source}")
         if drift is not None and args.verbose:
