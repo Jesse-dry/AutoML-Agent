@@ -1,8 +1,8 @@
 # AutoML-Agent
 
-LLM 驱动的 AutoML Agent —— 面向**多能源时序预测**（负荷 / 风电 / 电价）的**自动化特征工程**、**自进化特征优化**、**无泄漏闭环评测**与**决策价值评估**系统。
+LLM 驱动的 AutoML Agent —— 面向**多能源时序预测**（负荷 / 风电 / 光伏 / 电价）的**自动化特征工程**、**自进化特征优化**、**无泄漏闭环评测**与**风险感知概率预测**系统。
 
-**核心创新**：大语言模型（LLM）作为**预测建模决策器**，在**受约束动作空间**（ADD / REMOVE / REPLACE / KEEP / ROLLBACK / STOP 六类动作，特征仅允许 lag / rolling / time / cross 四类确定性操作，参数受时间因果性与安全上限约束）内**自主设计与删改特征**。每轮 Agent 在**误差画像**（分段 RMSE + bias）驱动下提出 **3 个不同假设的候选方案**，逐一评测后**择优 / 自动回滚**，并把每次实验写入**经验记忆**（跨 Task 共享，场景相似度检索复用）。所有评测跑在**无泄漏滚动回放**（预测月 online_h1）之上，保证结果可信。LLM 不写代码——基于数据统计、自相关分析（ACF）、特征重要性、误差画像和历史经验，**自主决定**生成 / 删除什么特征；确定性执行引擎负责**安全执行**。两者构成完整的 **感知→决策→执行→评估→反馈→记忆** 闭环。最终，预测不只在 RMSE / CRPS 等精度指标上被评估，还会被接入**储能套利决策评估器**，把预测误差货币化为**套利利润 / Regret**（业务/决策驱动，详见 ROADMAP V2.1）。
+**核心创新**：大语言模型（LLM）作为**预测建模决策器**，在**受约束动作空间**（ADD / REMOVE / REPLACE / KEEP / ROLLBACK / STOP 六类动作，特征仅允许 lag / rolling / time / cross 四类确定性操作，参数受时间因果性与安全上限约束）内**自主设计与删改特征**。每轮 Agent 在**误差画像**（分段 RMSE + bias）驱动下提出 **3 个不同假设的候选方案**，逐一评测后**择优 / 自动回滚**，并把每次实验写入**经验记忆**（跨 Task 共享，场景相似度检索复用）。所有评测跑在**无泄漏滚动回放**（预测月 online_h1）之上，保证结果可信。LLM 不写代码——基于数据统计、自相关分析（ACF）、特征重要性、误差画像和历史经验，**自主决定**生成 / 删除什么特征；确定性执行引擎负责**安全执行**。两者构成完整的 **感知→决策→执行→评估→反馈→记忆** 闭环。最终，智能体的决策从「选特征」扩展到「选输出协议」——在规律场景给点预测，在肥尾/尖峰场景（如电价）自动切换到分位数输出并放大尾部区间（**风险感知概率预测**，详见 ROADMAP V2.2）。
 
 **外循环（P1-B）**：把自进化 Agent 串联到 Task 1–15 滚动评测上，形成**滚动自适应进化双闭环智能体**——每完成一个 Task 保存**最佳策略 + 经验**，进入下一个 Task 前用**确定性漂移检测**（`evaluation/drift_detector.py`：均值 / 方差 / 分位 / ACF 周期 / 残余误差五类信号）度量 Task 间变化，再由 LLM 决定**继承 / 修改 / 重置**策略（`agent/strategy_migration.py`），以**warm-start**（`EvolutionRunner(init_spec=…)`）+ **自适应迭代预算**开始新一轮内循环。内循环负责"单 Task 自进化"，外循环负责"Task 间自适应迁移"。
 
@@ -10,11 +10,11 @@ LLM 驱动的 AutoML Agent —— 面向**多能源时序预测**（负荷 / 风
 - [GEFCom2014-L_V2](https://www.sciencedirect.com/journal/international-journal-of-forecasting/vol/30/issue/2)（负荷赛道，15 任务）—— 主论文核心
 - GEFCom2014-W_v2（风电赛道，15 Task × 10 Zone）—— ✅ 已接入（无泄漏滚动回放，LightGBM 基线 Mean RMSE 0.0998）
 - GEFCom2014-S_v2（光伏赛道，15 Task × 3 Zone）—— ✅ 已接入（无泄漏滚动回放，LightGBM 基线 Mean RMSE 0.0636）
-- GEFCom2014-P_V2（电价赛道，15 任务，单分区）—— **决策效能评估主线（价值出口）**：储能套利评估器把预测误差货币化为利润 / Regret（P-Value）
+- GEFCom2014-P_V2（电价赛道，15 任务，单分区）—— ✅ 已接入（无泄漏滚动回放，LightGBM 基线 Mean RMSE 6.96）；**第四赛道 · 风险感知概率预测的极端场景**（肥尾尖峰）
 - ECL（ElectricityLoadDiagrams，321 用户）—— ✅ 已接入（**跨用户迁移**范式，PatchTST 迁移 Median RMSE 67.5）
 
-> **演进方向**：从「负荷预测」扩展为「多能源自主智能体」，最终以**决策价值**为价值出口 ——
-> 预测不止于「准」，更在于「有用」。详见 [ROADMAP.md](ROADMAP.md)（V2.1 三层架构）。
+> **演进方向**：从「负荷预测」扩展为「多能源自主智能体」——跨能源任务、跨时间演化、跨场景迁移，
+> 并把预测升级为**风险感知概率输出**。详见 [ROADMAP.md](ROADMAP.md)（V2.2，V1→V5 自主智能体主线）。
 
 ---
 
@@ -85,9 +85,9 @@ LLM 驱动的 AutoML Agent —— 面向**多能源时序预测**（负荷 / 风
      + memory/strategies.jsonl（每 Task 最佳策略库）
 ```
 
-> **价值出口层（V2.1，业务/决策驱动）**：预测不只以精度评估，还会被接入**储能套利决策评估器**
-> —— 把 Market/Price Agent 的电价预测喂给带约束的虚拟储能 LP，按预测决策、按真实结算，
-> 产出**套利利润 / Regret**（预测误差的货币化）。三层架构 + P-Value 里程碑详见 [ROADMAP.md](ROADMAP.md)。
+> **风险感知升维（V4.0）**：预测不只以 RMSE 等点预测精度评估，还会被升级为**分位数概率预测**
+> （Pinball / CRPS / Coverage / Interval Width）。同一个智能体在规律场景给点预测，
+> 在肥尾尖峰场景（电价）自动切换到分位数输出并放大尾部区间。详见 [ROADMAP.md](ROADMAP.md)（V2.2）。
 
 ---
 
@@ -106,7 +106,8 @@ AutoML-Agent/
 │   ├── solar_task_builder.py            # ★Solar 特征规格（气象外生 VAR169/164/167 + 血缘式）+ SolarTask 构建
 │   ├── ecl_loader.py                    # ★ECL 加载器（321 用户负荷矩阵 + 随机划分 train/test 用户）
 │   ├── ecl_task_builder.py              # ★ECL 迁移任务构建（用户无关模型 + 复用 build_features）
-│   └── price_loader.py                  # (TODO) Price 电价加载器（P-Value：决策效能主线）
+│   ├── price_loader.py                  # ★Price 加载器（15 Task，预测窗口=1天；目标 Zonal Price + 外生预测负荷）
+│   └── price_task_builder.py            # ★Price 特征规格（外生 Forecasted Total/Zonal Load）+ PriceTask 构建
 │
 ├── evaluation/                          # 无泄漏滚动回放评测体系
 │   ├── forecast_protocol.py             # 评测协议（online_h1 / recursive_month_ahead）
@@ -121,7 +122,8 @@ AutoML-Agent/
 │   ├── solar_replay.py                  # ★Solar 回放主循环（15 Task × 3 Zone 逐分区独立模型 + 气象外生特征）
 │   ├── ecl_replay.py                    # ★ECL 跨用户迁移评测（统一时间切分协议 + per-user 相对指标）
 │   ├── ecl_protocol.py                  # ★ECL 统一评测协议（Train<2014-06 / Val 06~07 / Test 07~12 + 汇总审计）
-│   └── arbitrage_evaluator.py           # (TODO) 储能套利评估器（LP + Regret，P-Value 价值出口）
+│   ├── price_replay.py                  # ★Price 回放主循环（15 Task 预测日 24h + 外生负荷特征）
+│   └── arbitrage_evaluator.py           # (TODO) 储能套利演示（LP + Regret，附录非主线）
 │
 ├── models/
 │   ├── baseline/
@@ -163,7 +165,7 @@ AutoML-Agent/
 │   ├── run_wind_replay.py               # ★Wind Task 1–15 × Zone 1–10 无泄漏滚动回放评测（CLI）
 │   ├── run_solar_replay.py              # ★Solar Task 1–15 × Zone 1–3 无泄漏滚动回放评测（CLI）
 │   ├── run_ecl_replay.py                # ★ECL 跨用户迁移评测（CLI：LightGBM / persistence，统一协议）
-│   ├── run_price_replay.py              # (TODO) Price Task 1–15 无泄漏滚动回放评测（CLI，P-Value）
+│   ├── run_price_replay.py              # ★Price Task 1–15 无泄漏滚动回放评测（CLI，P-Value）
 │   ├── run_feature_agent.py             # v1 特征工程 Agent 实验（legacy）
 │   ├── feature_agent_task15/            # Task 15 v1 实验输出
 │   └── output/                          # 评测输出（predictions / manifest，gitignored）
@@ -373,6 +375,27 @@ python tests/test_ecl_suite.py
 > 大多数用户不如"抄上一小时"。而 **PatchTST（channel-independence + RevIN）** 逐序列归一化、
 > 共享权重学用户无关规律，**93.4% 未见用户赢过 persistence、100% 赢过 seasonal naive**——
 > 这是"时序经验迁移有效"（Exp 4）的核心证据。LightGBM 基线作为 Agent 的对照基准。
+### 3.4 Price 电价赛道滚动回放（P-Value 第一步）
+
+电价赛道（`GEFCom2014-P_v2/`）：15 Task，单分区 ZONEID=1。预测窗口 = **1 天（24h）**
+（15 个特定日期，非整月），目标 `Zonal Price`（肥尾电价，均值≈48.6、p99≈156、max≈364），
+特征含外生 `Forecasted Total/Zonal Load`（决策时点可得的负荷预报）。
+
+```bash
+# 全量 1:15 回放（LightGBM / persistence）
+python experiments/run_price_replay.py --tasks 1:15 --model lightgbm
+python experiments/run_price_replay.py --tasks 1:15 --model persistence
+# 指定任务 / 快速泄漏检查
+python experiments/run_price_replay.py --tasks 1:3 --model lightgbm --leak-check fast
+```
+
+产出（`experiments/output/price_replay/`）：
+- 逐 Task RMSE 表 + **Mean / Std / Worst**；`predictions/task_{01..15}.csv` 逐小时 `y_true / y_pred / error`
+- `run_manifest.json` —— 数据集 / 特征血缘哈希 / seed / git_commit 审计
+
+> **Price 基线**（LightGBM，online_h1）：Mean RMSE **6.96**（电价量纲），vs persistence 10.27（↓32%），
+> 15 Task 全部领先，验证外生负荷特征有效。尖峰日（Task 8/9/15）RMSE 18.8/29.1/12.0，
+> 是电价肥尾的典型难点 —— 正是 V4.0 风险感知概率预测（尾部区间 / 尖峰捕获）要解决的场景。
 
 ### 4. 运行自进化 Agent（P1-A）
 
@@ -737,5 +760,6 @@ df_new, added_cols, skipped = execute_features_from_llm(df, validated)
 - [x] ~~多能源扩展 · Solar 数据接入 + 基线回放（`data/solar_loader.py` / `solar_task_builder.py` / `evaluation/solar_replay.py` / `run_solar_replay.py`，RMSE 0.0636）~~
 - [x] ~~ECL 跨用户迁移接入（Exp 4：`data/ecl_loader.py` / `ecl_task_builder.py` / `evaluation/ecl_replay.py` / `run_ecl_replay.py`，LightGBM 迁移基线）~~
 - [x] ~~ECL PatchTST 跨用户迁移（`models/PatchTST/ecl_patchtst_migration.py`，RevIN 单通道 + 统一评测协议，93.4% 用户优于 persistence）~~
-- [ ] 多能源扩展 · Wind / Solar 自进化 Agent 泛化 / 多专家协同（V3.0）
-- [ ] 多能源扩展 · Price 决策效能主线（P-Value：`price_loader` + 储能套利评估器 + 尖峰双层，见 ROADMAP）
+- [ ] 多能源扩展 · Wind 自进化 Agent 泛化 / 多专家协同（V3.0）
+- [x] ~~多能源扩展 · Price 数据接入 + 基线回放（`data/price_loader.py` / `price_task_builder.py` / `evaluation/price_replay.py` / `run_price_replay.py`，P1–P6 全绿，LightGBM Mean RMSE 6.96）~~
+- [ ] 风险感知概率预测（V4.0：Quantile LightGBM + Conformal，Price 肥尾尖峰为试金石，见 ROADMAP）

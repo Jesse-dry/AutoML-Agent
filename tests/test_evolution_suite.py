@@ -77,7 +77,7 @@ def _add_action(feature_spec):
 # ---------------------------------------------------------------
 
 def _mock_eval(rules):
-    def _evaluate(task_id, spec, protocol, val_hours=168, backend_factory=None,
+    def _evaluate(task_id, zone, spec, protocol, val_hours=168, backend_factory=None,
                   seed=42, data_dir=None):
         rmse = float(rules([s["name"] for s in spec]))
         y_true = 100.0 + 10.0 * np.sin(np.linspace(0, 6.28, 48))

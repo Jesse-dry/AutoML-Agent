@@ -18,6 +18,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from agent.energy_registry import get_energy
 from agent.feature_agent import _extract_json
 from agent.feature_spec import snapshot, validate_spec_list
 from data.task_builder import FEATURE_SPEC, MAX_LAG
@@ -116,14 +117,14 @@ def parse_migration_v2(raw: Any, expected_task_id: Optional[int] = None) -> Dict
 # init_spec 校验
 # ---------------------------------------------------------------
 def resolve_init_spec(spec: List[dict], fallback: Optional[List[dict]] = None,
-                      max_lag: int = MAX_LAG) -> List[dict]:
+                      max_lag: int = MAX_LAG, target_col: str = "LOAD") -> List[dict]:
     """校验候选 init_spec；空 / 泄漏 / 违规 → 回退 fallback（默认 FEATURE_SPEC）。"""
     if fallback is None:
         fallback = FEATURE_SPEC
     if not spec:
         return snapshot(fallback)
     try:
-        viols = validate_spec_list(spec, max_lag=max_lag)
+        viols = validate_spec_list(spec, target_col=target_col, max_lag=max_lag)
         if viols:
             return snapshot(fallback)
     except Exception:
@@ -132,12 +133,15 @@ def resolve_init_spec(spec: List[dict], fallback: Optional[List[dict]] = None,
 
 
 def _init_for_policy(policy: str, prev_strategy: Optional[StrategyRecord],
-                     max_lag: int) -> List[dict]:
-    """按 policy 确定 init_spec（prev → 继承上一 Task spec；base → FEATURE_SPEC）。"""
+                     max_lag: int, base_spec: Optional[List[dict]] = None,
+                     target_col: str = "LOAD") -> List[dict]:
+    """按 policy 确定 init_spec（prev → 继承上一 Task spec；base → 基础特征集）。"""
+    base = base_spec if base_spec is not None else FEATURE_SPEC
     default = POLICY_DEFAULTS[policy]
     if default["init"] == "prev" and prev_strategy is not None:
-        return resolve_init_spec(prev_strategy.spec, fallback=FEATURE_SPEC, max_lag=max_lag)
-    return resolve_init_spec(FEATURE_SPEC, fallback=FEATURE_SPEC, max_lag=max_lag)
+        return resolve_init_spec(prev_strategy.spec, fallback=base, max_lag=max_lag,
+                                 target_col=target_col)
+    return resolve_init_spec(base, fallback=base, max_lag=max_lag, target_col=target_col)
 
 
 # ---------------------------------------------------------------
@@ -145,10 +149,12 @@ def _init_for_policy(policy: str, prev_strategy: Optional[StrategyRecord],
 # ---------------------------------------------------------------
 def default_decision(task_id: int, level: str,
                      prev_strategy: Optional[StrategyRecord] = None,
-                     max_lag: int = MAX_LAG) -> MigrationDecision:
+                     max_lag: int = MAX_LAG,
+                     base_spec: Optional[List[dict]] = None,
+                     target_col: str = "LOAD") -> MigrationDecision:
     policy = {"low": "inherit", "medium": "modify"}.get(level, "reset")
     default = POLICY_DEFAULTS[policy]
-    init_spec = _init_for_policy(policy, prev_strategy, max_lag)
+    init_spec = _init_for_policy(policy, prev_strategy, max_lag, base_spec, target_col)
     return MigrationDecision(
         task_id=task_id,
         policy=policy,
@@ -160,13 +166,17 @@ def default_decision(task_id: int, level: str,
     )
 
 
-def cold_start_decision(task_id: int, max_lag: int = MAX_LAG) -> MigrationDecision:
-    """Task 1 冷启动：无上一 Task，从 FEATURE_SPEC 全量搜索。"""
+def cold_start_decision(task_id: int, max_lag: int = MAX_LAG,
+                        base_spec: Optional[List[dict]] = None,
+                        target_col: str = "LOAD") -> MigrationDecision:
+    """Task 1 冷启动：无上一 Task，从基础特征集全量搜索。"""
+    base = base_spec if base_spec is not None else FEATURE_SPEC
     return MigrationDecision(
         task_id=task_id,
         policy="reset",
         rationale="冷启动：无上一 Task 策略，从安全基础特征集全量搜索",
-        init_spec=resolve_init_spec(FEATURE_SPEC, fallback=FEATURE_SPEC, max_lag=max_lag),
+        init_spec=resolve_init_spec(base, fallback=base, max_lag=max_lag,
+                                    target_col=target_col),
         max_iter=COLD_START_MAX_ITER,
         drift_level="n/a",
         source="deterministic",
@@ -179,9 +189,11 @@ def cold_start_decision(task_id: int, max_lag: int = MAX_LAG) -> MigrationDecisi
 def build_migration_messages(task_id: int, drift: DriftReport,
                              prev_strategy: Optional[StrategyRecord] = None,
                              scenario: Optional[Scenario] = None,
-                             memory: Optional[MemoryManager] = None) -> List[Dict]:
+                             memory: Optional[MemoryManager] = None,
+                             energy: str = "load") -> List[Dict]:
+    domain = get_energy(energy).label
     system = (
-        "你是电力负荷预测 AutoML 系统的跨 Task 策略迁移决策器。\n"
+        f"你是{domain} AutoML 系统的跨 Task 策略迁移决策器。\n"
         "任务：根据数据漂移报告与历史策略，决定下一个预测月（Task）的特征工程策略：\n"
         "  inherit  小漂移 → 沿用上一 Task 最佳特征集，只做少量微调（约 2 轮）\n"
         "  modify   中漂移 → 沿用上一 Task 最佳特征集，重新调优（默认轮数）\n"
@@ -224,11 +236,17 @@ class MigrationPlanner:
     def __init__(self, llm_client: Optional[Any] = None,
                  memory: Optional[MemoryManager] = None,
                  max_retries: int = 3,
-                 max_lag: int = MAX_LAG):
+                 max_lag: int = MAX_LAG,
+                 energy: str = "load",
+                 target_col: str = "LOAD",
+                 base_spec: Optional[List[dict]] = None):
         self.llm_client = llm_client
         self.memory = memory
         self.max_retries = max_retries
         self.max_lag = max_lag
+        self.energy = energy
+        self.target_col = target_col
+        self.base_spec = base_spec  # None → FEATURE_SPEC（Load）
 
     def plan(self, task_id: int,
              drift: Optional[DriftReport] = None,
@@ -237,7 +255,9 @@ class MigrationPlanner:
              llm_client: Optional[Any] = None) -> MigrationDecision:
         # 冷启动：无上一 Task / 无 drift → 全量搜索
         if drift is None or prev_strategy is None:
-            return cold_start_decision(task_id, max_lag=self.max_lag)
+            return cold_start_decision(task_id, max_lag=self.max_lag,
+                                       base_spec=self.base_spec,
+                                       target_col=self.target_col)
 
         client = llm_client or self.llm_client
         if client is not None:
@@ -246,13 +266,15 @@ class MigrationPlanner:
                 return decision
             print(f"  [WARN] Task {task_id} 迁移 LLM 决策失败，走确定性兜底")
 
-        return default_decision(task_id, drift.level, prev_strategy, max_lag=self.max_lag)
+        return default_decision(task_id, drift.level, prev_strategy,
+                                max_lag=self.max_lag, base_spec=self.base_spec,
+                                target_col=self.target_col)
 
     def _call_llm(self, client: Any, task_id: int, drift: DriftReport,
                   prev_strategy: StrategyRecord,
                   scenario: Optional[Scenario]) -> Optional[MigrationDecision]:
         messages = build_migration_messages(task_id, drift, prev_strategy, scenario,
-                                            self.memory)
+                                            self.memory, energy=self.energy)
         for attempt in range(1, self.max_retries + 1):
             try:
                 raw = client.chat(messages, temperature=0.2)
@@ -268,7 +290,8 @@ class MigrationPlanner:
                 }
 
         policy = parsed["policy"]
-        init_spec = _init_for_policy(policy, prev_strategy, self.max_lag)
+        init_spec = _init_for_policy(policy, prev_strategy, self.max_lag,
+                                     self.base_spec, self.target_col)
         max_iter = (parsed["max_iter"] if parsed["max_iter"] is not None
                     else POLICY_DEFAULTS[policy]["max_iter"])
         return MigrationDecision(

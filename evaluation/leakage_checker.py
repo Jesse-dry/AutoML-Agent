@@ -109,6 +109,13 @@ def _pass_a(spec: List[dict], feature_cols: List[str], target_col: str,
                 violations.append(LeakageViolation(
                     name, None, "cross_operand_order",
                     f"cross {name} 操作列 {col1}/{col2} 必须定义在自身之前"))
+        elif stype == "current":
+            # 外生当前小时值（lookback=0）：仅当 source != target_col 才合法；
+            # source == target_col 即直接使用当前目标，判定泄漏。
+            if s.get("source", "") == target_col:
+                violations.append(LeakageViolation(
+                    name, None, "current_uses_target",
+                    f"current {name} 作用于目标列 {target_col}，等于直接使用当前目标（泄漏）"))
         elif stype == "time":
             pass
     # 目标别名

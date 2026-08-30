@@ -22,14 +22,12 @@ from agent.evolution_schema import (
     format_round_history,
     parse_llm_v2,
 )
+from agent.energy_registry import get_energy
 from agent.feature_agent import compute_acf_summary
 from agent.feature_spec import apply_actions, snapshot, validate_spec_list
-from data.availability import available_history
-from data.gefcom_loader import GEFCOM_DATA_DIR
-from data.task_builder import FEATURE_SPEC, TARGET_COL, feature_spec_hash
+from data.task_builder import feature_spec_hash
 from evaluation.error_profiler import format_profile_for_llm
 from evaluation.forecast_protocol import ForecastProtocol, ONLINE_H1
-from evaluation.spec_evaluator import evaluate_spec
 from memory.memory_manager import (
     ExperienceRecord,
     MemoryManager,
@@ -37,7 +35,7 @@ from memory.memory_manager import (
     format_memories_for_llm,
     season_from_month,
 )
-from models.replay_backends import LightGBMBackend, ModelBackend
+from models.replay_backends import LightGBMBackend, ModelBackend, make_backend
 
 
 class EvolutionRunner:
@@ -63,11 +61,14 @@ class EvolutionRunner:
         max_lag: int = 168,
         init_spec: Optional[List[dict]] = None,
         init_spec_label: str = "",
+        energy: str = "load",
+        zone: Optional[int] = None,
     ):
         self.task_id = task_id
+        self.energy = energy
+        self.zone = zone
         self.backend_factory = backend_factory or (lambda: LightGBMBackend())
         self.protocol = protocol
-        self.spec_evaluator = spec_evaluator or evaluate_spec
         self.llm_client = llm_client
         self.memory = memory
         self.n_candidates = max(1, int(n_candidates))
@@ -77,14 +78,28 @@ class EvolutionRunner:
         self.patience = int(patience)
         self.val_hours = val_hours
         self.seed = seed
-        self.data_dir = data_dir or GEFCOM_DATA_DIR
-        self.dataset_name = dataset_name or f"GEFCom2014 Task {task_id}"
         self.max_lag = int(max_lag)
+
+        # energy/track 资源解析（查注册表；接入新赛道 = 加一行配置，不改此段）
+        es = get_energy(energy)
+        self.target_col = es.target_col
+        self._base_spec = snapshot(es.base_spec)
+        self._default_data_dir = es.data_dir
+        self._availability_fn = es.availability_fn
+        self._default_spec_evaluator = es.spec_evaluator
+        self.allowed_sources = set(es.allowed_sources)
+        self.zones = es.zones
+        zone_suffix = f" Zone {zone}" if zone is not None else ""
+        self._default_dataset_name = f"{es.dataset_label} Task {task_id}{zone_suffix}"
+
+        self.data_dir = data_dir or self._default_data_dir
+        self.dataset_name = dataset_name or self._default_dataset_name
+        self.spec_evaluator = spec_evaluator or self._default_spec_evaluator
 
         # 状态（init_spec 提供跨 Task 迁移的 warm-start 起点；
         # Round 0 评测 init_spec → baseline_rmse = 继承策略在本 Task 的 RMSE）
         self.init_spec = snapshot(init_spec) if init_spec is not None else None
-        base = self.init_spec if self.init_spec is not None else snapshot(FEATURE_SPEC)
+        base = self.init_spec if self.init_spec is not None else snapshot(self._base_spec)
         self.init_spec_label = (
             init_spec_label
             or ("inherited spec" if self.init_spec is not None else "FEATURE_SPEC")
@@ -95,6 +110,10 @@ class EvolutionRunner:
         self.best_rmse: float = float("inf")
         self.baseline_rmse: float = float("inf")
         self.best_round: int = 0
+        # 模型选择状态：当前模型与达到 best 的模型（从 backend_factory 推断初始名）
+        _probe = self.backend_factory()
+        self.current_model: str = getattr(_probe, "name", "lightgbm")
+        self.best_model: str = self.current_model
         self._current_result: Optional[Dict] = None   # 当前 best 的评测结果（画像/重要性）
         self._scenario: Optional[Scenario] = None
         self.round_records: List[Dict] = []
@@ -104,29 +123,32 @@ class EvolutionRunner:
     # 场景
     # ---------------------------------------------------------
     def _build_scenario(self) -> Scenario:
-        av = available_history(self.task_id, self.data_dir)
-        load = av.history_df[TARGET_COL].dropna()
-        cv = float(load.std() / load.mean()) if load.mean() != 0 else 0.0
-        acf = compute_acf_summary(av.history_df, TARGET_COL, lags=[24, 168])
+        av = self._availability_fn(self.task_id, self.zone, self.data_dir)
+        target = av.history_df[self.target_col].dropna()
+        cv = float(target.std() / target.mean()) if target.mean() != 0 else 0.0
+        acf = compute_acf_summary(av.history_df, self.target_col, lags=[24, 168])
         season = season_from_month(av.forecast_ts[0].month)
         return Scenario(
             season=season,
             acf_24=float(acf.get(24, 0.0)),
             acf_168=float(acf.get(168, 0.0)),
             load_cv=cv,
+            energy=self.energy,
         )
 
     # ---------------------------------------------------------
     # 评测（带缓存）
     # ---------------------------------------------------------
-    def _evaluate(self, spec: List[dict]) -> Dict:
-        key = (self.task_id, feature_spec_hash(spec), self.protocol.name)
+    def _evaluate(self, spec: List[dict], model_name: Optional[str] = None) -> Dict:
+        model = model_name or self.current_model
+        key = (self.task_id, self.zone, feature_spec_hash(spec), model, self.protocol.name)
         if key in self._eval_cache:
             return self._eval_cache[key]
+        factory = lambda: make_backend(model)
         res = self.spec_evaluator(
-            self.task_id, spec, self.protocol,
+            self.task_id, self.zone, spec, self.protocol,
             val_hours=self.val_hours,
-            backend_factory=self.backend_factory,
+            backend_factory=factory,
             seed=self.seed,
             data_dir=self.data_dir,
         )
@@ -175,6 +197,10 @@ class EvolutionRunner:
             memories_text=memories_text,
             round_history_text=hist_text,
             max_lag=self.max_lag,
+            current_model=self.current_model,
+            target_col=self.target_col,
+            energy=self.energy,
+            exogenous_sources=sorted(self.allowed_sources - {self.target_col}),
         )
 
     # ---------------------------------------------------------
@@ -215,10 +241,12 @@ class EvolutionRunner:
         candidates: List[Dict] = []
         for c in parsed["candidates"]:
             acts = c["actions"]
+            model = c.get("model") or self.current_model
             base = {
                 "candidate_id": c["candidate_id"],
                 "hypothesis": c["hypothesis"],
                 "actions": acts,
+                "model": model,
             }
 
             if any(a.get("type") == "stop" for a in acts):
@@ -230,12 +258,15 @@ class EvolutionRunner:
 
             try:
                 filtered_acts = [a for a in acts if a.get("type") != "rollback"]
-                cspec = apply_actions(base_spec, filtered_acts)
+                cspec = apply_actions(base_spec, filtered_acts,
+                                      target_col=self.target_col,
+                                      allowed_sources=self.allowed_sources)
             except ValueError as e:
                 candidates.append({**base, "state": "invalid", "error": str(e)})
                 continue
 
-            viols = validate_spec_list(cspec, max_lag=self.max_lag)
+            viols = validate_spec_list(cspec, target_col=self.target_col,
+                                       max_lag=self.max_lag)
             if viols:
                 candidates.append({
                     **base, "state": "invalid",
@@ -243,7 +274,7 @@ class EvolutionRunner:
                 })
                 continue
 
-            res = self._evaluate(cspec)
+            res = self._evaluate(cspec, model)
             candidates.append({
                 **base, "state": "evaluated", "spec": cspec, "res": res,
                 "base_spec": base_spec, "rollback_base": has_rollback,
@@ -273,19 +304,22 @@ class EvolutionRunner:
         delta = cand_rmse - before
 
         if cand_rmse < self.best_rmse - self.improvement_eps:
-            # 接受：更新 best 与 current
+            # 接受：更新 best 与 current（spec + model 同步）
             self.best_spec = snapshot(best_c["spec"])
             self.best_rmse = cand_rmse
             self.current_spec = snapshot(self.best_spec)
+            self.best_model = best_c.get("model", self.current_model)
+            self.current_model = self.best_model
             self.best_round = rnd
             self._current_result = best_c["res"]
             outcome = "improved"
-            note = f"[improved] {', '.join(a.get('type','?') for a in best_c['actions'])}"
+            note = f"[improved:{self.best_model}] {', '.join(a.get('type','?') for a in best_c['actions'])}"
         else:
-            # 自动回滚：current:=best（失败动作保留进 memory 作反例）
+            # 自动回滚：current:=best（spec + model 同步，失败动作保留进 memory 作反例）
             self.current_spec = snapshot(self.best_spec)
+            self.current_model = self.best_model
             outcome = "rolled_back"
-            note = f"[rolled_back] 最优候选 ΔRMSE {delta:+.4f}，回到 best={self.best_rmse:.4f}"
+            note = f"[rolled_back] 最优候选 ΔRMSE {delta:+.4f}，回到 best={self.best_rmse:.4f} ({self.best_model})"
 
         if verbose:
             rmse_list = ", ".join(f"C{c['candidate_id']}={c['res']['rmse']:.4f}" for c in evaled)
@@ -312,9 +346,11 @@ class EvolutionRunner:
         rec = ExperienceRecord(
             task_id=self.task_id,
             round=rnd,
+            energy=self.energy,
             scenario=self._scenario or self._build_scenario(),
             problem={"worst_segment": worst, "bias": profile.bias},
             actions=best_c["actions"],
+            model=best_c.get("model", self.current_model),
             spec_before=best_c.get("base_spec", self.current_spec),
             spec_after=best_c.get("spec", self.current_spec),
             before_rmse=before,
@@ -337,7 +373,7 @@ class EvolutionRunner:
             print("=" * 60)
             print(f"EvolutionRunner — Task {self.task_id} 自进化特征工程")
             print(f"  协议: {self.protocol.name}  候选/轮: {self.n_candidates}  "
-                  f"最大轮: {self.max_iter}  模型: {self.backend_factory().name}")
+                  f"最大轮: {self.max_iter}  模型: {self.current_model}")
             print("=" * 60)
             print("Round 0: baseline 评测...")
 
@@ -425,6 +461,7 @@ class EvolutionRunner:
             "baseline_rmse": self.baseline_rmse,
             "best_rmse": self.best_rmse,
             "best_round": self.best_round,
+            "best_model": self.best_model,
             "baseline_spec": self.baseline_spec,
             "best_spec": self.best_spec,
             "current_spec": self.current_spec,
