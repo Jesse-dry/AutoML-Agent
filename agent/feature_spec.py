@@ -15,7 +15,7 @@
 # rollback / stop 不在 apply_actions 内解释（由 evolution_runner 顶层处理）。
 # ---------------------------------------------------------------
 from copy import deepcopy
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from data.task_builder import MAX_LAG
 from evaluation.leakage_checker import LeakageViolation, _pass_a
@@ -254,12 +254,15 @@ def snapshot(spec: List[dict]) -> List[dict]:
 
 
 def apply_actions(base_spec: List[dict], actions: List[dict],
-                  target_col: str = TARGET_COL, allowed_sources=None) -> List[dict]:
+                  target_col: str = TARGET_COL, allowed_sources=None,
+                  warnings: Optional[List[str]] = None) -> List[dict]:
     """
-    按序解释动作，返回新 spec 列表。任何非法动作抛 ValueError（候选作废）。
+    按序解释动作，返回新 spec 列表。非法动作抛 ValueError（候选作废）。
 
     说明：
-      - add_feature    追加 normalize 后的 spec（cross 操作列必须已存在）
+      - add_feature    追加 normalize 后的 spec（cross 操作列必须已存在）；
+                       重名**不报错**，跳过该动作并把提示写入 warnings（可选出参），
+                       避免一个重复动作连坐整个候选的其它有效动作。
       - remove_feature 按 name 删除（不存在 → ValueError）
       - replace_feature 原位替换（位置不变，name 由新 spec 推导）
       - keep           无操作
@@ -275,8 +278,9 @@ def apply_actions(base_spec: List[dict], actions: List[dict],
             new_spec = normalize_spec(a["feature_spec"], spec,
                                       target_col=target_col, allowed_sources=allowed_sources)
             if new_spec["name"] in [s["name"] for s in spec]:
-                raise ValueError(
-                    f"add_feature: 特征 {new_spec['name']} 已存在，不可重复添加")
+                if warnings is not None:
+                    warnings.append(f"add_feature 跳过重复特征 {new_spec['name']}")
+                continue
             spec.append(new_spec)
 
         elif atype == "remove_feature":

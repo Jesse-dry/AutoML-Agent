@@ -157,12 +157,18 @@ def test_e2_apply_actions():
         check("E2 remove 不存在拒绝", False)
     except ValueError:
         check("E2 remove 不存在拒绝", True)
-    # add 重名 → ValueError
-    try:
-        apply_actions(base, [_add_action({"type": "lag", "source": "LOAD", "k": 1})])
-        check("E2 add 重名拒绝", False)
-    except ValueError:
-        check("E2 add 重名拒绝", True)
+    # add 重名 → 跳过而非抛错（避免连坐整单候选）；warnings 出参记录提示
+    _warn = []
+    s5 = apply_actions(base, [_add_action({"type": "lag", "source": "LOAD", "k": 1})],
+                       warnings=_warn)
+    check("E2 add 重名跳过", _names(s5) == _names(base) and len(_warn) == 1)
+    # 混合动作：1 个重名 + 1 个新特征 → 新特征仍生效，重名被跳过
+    _warn2 = []
+    s6 = apply_actions(base, [
+        _add_action({"type": "lag", "source": "LOAD", "k": 1}),   # 重名（跳过）
+        _add_action({"type": "lag", "source": "LOAD", "k": 48}),  # 新（生效）
+    ], warnings=_warn2)
+    check("E2 重名连坐解除", _names(s6) == _names(base) + ["lag_48"] and len(_warn2) == 1)
 
 
 # ---------------- E3 ----------------

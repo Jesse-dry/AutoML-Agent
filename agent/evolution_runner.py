@@ -258,9 +258,11 @@ class EvolutionRunner:
 
             try:
                 filtered_acts = [a for a in acts if a.get("type") != "rollback"]
+                skipped: List[str] = []
                 cspec = apply_actions(base_spec, filtered_acts,
                                       target_col=self.target_col,
-                                      allowed_sources=self.allowed_sources)
+                                      allowed_sources=self.allowed_sources,
+                                      warnings=skipped)
             except ValueError as e:
                 candidates.append({**base, "state": "invalid", "error": str(e)})
                 continue
@@ -278,6 +280,7 @@ class EvolutionRunner:
             candidates.append({
                 **base, "state": "evaluated", "spec": cspec, "res": res,
                 "base_spec": base_spec, "rollback_base": has_rollback,
+                "skipped": skipped,
             })
         return candidates
 
@@ -320,6 +323,10 @@ class EvolutionRunner:
             self.current_model = self.best_model
             outcome = "rolled_back"
             note = f"[rolled_back] 最优候选 ΔRMSE {delta:+.4f}，回到 best={self.best_rmse:.4f} ({self.best_model})"
+
+        skipped = best_c.get("skipped") or []
+        if skipped:
+            note += f"（跳过重复: {'; '.join(skipped)}）"
 
         if verbose:
             rmse_list = ", ".join(f"C{c['candidate_id']}={c['res']['rmse']:.4f}" for c in evaled)
