@@ -44,7 +44,12 @@ from evaluation.drift_detector import (  # noqa: E402
 from evaluation.forecast_protocol import get_protocol  # noqa: E402
 from memory.memory_manager import MemoryManager, StrategyRecord  # noqa: E402
 from models.replay_backends import make_backend  # noqa: E402
-from run_self_evolving_agent import _demo_script  # noqa: E402
+from run_self_evolving_agent import (  # noqa: E402
+    _build_price_scenario,
+    _build_solar_scenario,
+    _build_wind_scenario,
+    _demo_script,
+)
 from run_task_replay import parse_tasks  # noqa: E402
 
 
@@ -91,6 +96,14 @@ def run_outer_loop(args) -> List[Dict]:
     availability_fn = es.availability_fn
     ref_evaluator = es.spec_evaluator
     zone = args.zone if es.zones else None
+    # 外生列 = allowed_sources 去掉目标列（对齐 EvolutionRunner 的 exogenous_cols）
+    exogenous_cols = [c for c in es.allowed_sources if c != target_col]
+    # 场景构建器：solar/wind/price 用赛道专属 builder；load 用默认（available_history）
+    scenario_builder = {
+        "wind": _build_wind_scenario,
+        "solar": _build_solar_scenario,
+        "price": _build_price_scenario,
+    }.get(energy)
 
     outdir = Path(args.outdir) if args.outdir else (
         PROJECT_ROOT / "experiments" / "output" / {
@@ -105,7 +118,9 @@ def run_outer_loop(args) -> List[Dict]:
     # LLM 客户端：dry-run 用 ScriptedLLM（进化闭环）；迁移决策走确定性兜底。
     if args.dry_run:
         llm_client: Optional[QwenClient] = None
-        evolution_llm = ScriptedLLM(_demo_script(args.n_candidates, args.energy))
+        evolution_llm = ScriptedLLM(_demo_script(
+            args.n_candidates, target_col=target_col,
+            feature_tier=3, exogenous_cols=tuple(exogenous_cols)))
         print(f"模式: DRY RUN（迁移=确定性映射，进化=ScriptedLLM）  Tasks: {tasks}  "
               f"energy={energy}  模型: {args.model}")
     else:
@@ -172,8 +187,14 @@ def run_outer_loop(args) -> List[Dict]:
             init_spec=decision.init_spec,
             init_spec_label=(f"Task {prev_strategy.task_id} best"
                              if prev_strategy is not None else "FEATURE_SPEC"),
-            energy=energy,
+            feature_tier=3,
+            target_col=target_col,
+            exogenous_cols=exogenous_cols,
             zone=zone,
+            scenario_builder=scenario_builder,
+            spec_evaluator=ref_evaluator,
+            data_dir=es.data_dir,
+            domain_knowledge=es.domain,
         )
         result = runner.run(verbose=args.verbose)
         print(f"  Task {tid}: baseline RMSE={result['baseline_rmse']:.4f} → "
@@ -182,9 +203,11 @@ def run_outer_loop(args) -> List[Dict]:
         # ---- 参考基线（可选）：基础特征集在该 Task 的 RMSE ----
         ref_rmse = None
         if args.with_reference_baseline:
-            ref = ref_evaluator(tid, zone, snapshot(base_spec), protocol,
+            ref = ref_evaluator(tid, snapshot(base_spec), protocol,
                                 val_hours=args.val_hours,
-                                backend_factory=backend_factory, seed=args.seed)
+                                backend_factory=backend_factory, seed=args.seed,
+                                zone=zone, target_col=target_col,
+                                exogenous_cols=exogenous_cols)
             ref_rmse = float(ref["rmse"])
             print(f"  参考基线 FEATURE_SPEC RMSE = {ref_rmse:.4f}")
 

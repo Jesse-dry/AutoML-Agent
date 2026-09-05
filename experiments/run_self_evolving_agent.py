@@ -37,6 +37,13 @@ from data.solar_task_builder import (  # noqa: E402
     SOLAR_TARGET_COL,
     SOLAR_WEATHER_COLS,
 )
+from data.price_loader import (  # noqa: E402
+    PRICE_DATA_DIR,
+    PRICE_EXOGENOUS_COLS,
+    PRICE_TARGET_COL,
+    price_available_history,
+)
+from data.price_task_builder import PRICE_FEATURE_SPEC  # noqa: E402
 from data.task_builder import COLD_START_FEATURE_SPEC, FEATURE_SPEC  # noqa: E402
 from data.wind_loader import WIND_DATA_DIR, wind_available_history  # noqa: E402
 from data.wind_task_builder import (  # noqa: E402
@@ -46,6 +53,7 @@ from data.wind_task_builder import (  # noqa: E402
 )
 from evaluation.error_profiler import format_profile_for_llm  # noqa: E402
 from evaluation.forecast_protocol import get_protocol  # noqa: E402
+from evaluation.price_spec_evaluator import evaluate_price_spec  # noqa: E402
 from evaluation.solar_spec_evaluator import evaluate_solar_spec  # noqa: E402
 from evaluation.wind_spec_evaluator import evaluate_wind_spec  # noqa: E402
 from memory.memory_manager import (  # noqa: E402
@@ -88,6 +96,21 @@ def _build_wind_scenario(task_id: int, data_dir, zone):
     w = av.history_df[WIND_TARGET_COL].dropna()
     cv = float(w.std() / w.mean()) if w.mean() != 0 else 0.0
     acf = compute_acf_summary(av.history_df, WIND_TARGET_COL, lags=[24, 168])
+    season = season_from_month(av.forecast_ts[0].month)
+    return Scenario(
+        season=season,
+        acf_24=float(acf.get(24, 0.0)),
+        acf_168=float(acf.get(168, 0.0)),
+        load_cv=cv,
+    )
+
+
+def _build_price_scenario(task_id: int, data_dir, zone):
+    """Price 场景构建器（单分区，zone 忽略）。"""
+    av = price_available_history(task_id, data_dir)
+    p = av.history_df[PRICE_TARGET_COL].dropna()
+    cv = float(p.std() / p.mean()) if p.mean() != 0 else 0.0
+    acf = compute_acf_summary(av.history_df, PRICE_TARGET_COL, lags=[24, 168])
     season = season_from_month(av.forecast_ts[0].month)
     return Scenario(
         season=season,
@@ -237,8 +260,8 @@ def main() -> int:
     parser.add_argument("--memory-file", default=None, help="记忆文件路径（默认 memory/experiment_memory.jsonl）")
     parser.add_argument("--max-lag", type=int, default=168)
     # ★ 三档动作空间 + 数据集
-    parser.add_argument("--dataset", default="load", choices=["load", "solar", "wind"],
-                        help="load | solar | wind（solar/wind 需 --zone）")
+    parser.add_argument("--dataset", default="load", choices=["load", "solar", "wind", "price"],
+                        help="load | solar | wind | price（solar/wind 需 --zone）")
     parser.add_argument("--zone", type=int, default=1, help="Solar zone 1..3 / Wind zone 1..10")
     parser.add_argument("--feature-tier", type=int, default=3,
                         help="动作空间档位：1=基本时序 2=能源专有 3=组合类")
@@ -307,6 +330,16 @@ def main() -> int:
             else WIND_FEATURE_SPEC)
         init_spec_label = ("WIND_COLD_START" if args.baseline == "cold_start"
                            else "WIND_FEATURE_SPEC")
+    elif args.dataset == "price":
+        target_col = PRICE_TARGET_COL
+        exogenous_cols = list(PRICE_EXOGENOUS_COLS)
+        spec_evaluator = evaluate_price_spec
+        scenario_builder = _build_price_scenario
+        data_dir = Path(args.data_dir) if args.data_dir else PRICE_DATA_DIR
+        dataset_name = f"GEFCom2014 Price Task {args.task}"
+        # price 暂无冷启动 spec，直接以完整特征集为起点（--baseline 对 price 无效）
+        init_spec = snapshot(PRICE_FEATURE_SPEC)
+        init_spec_label = "PRICE_FEATURE_SPEC"
     else:
         target_col = "LOAD"
         exogenous_cols = []

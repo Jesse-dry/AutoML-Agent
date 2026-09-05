@@ -7,9 +7,9 @@
 #
 # 统一签名约定：
 #   availability_fn(task_id, zone, data_dir) -> Availability
-#   spec_evaluator(task_id, zone, spec, protocol, val_hours, backend_factory,
-#                  seed, data_dir) -> dict
-#   单分区赛道（Load/Price）zone 传 None，wrapper 忽略。
+#   spec_evaluator(task_id, spec, protocol, val_hours, eval_hours, backend_factory,
+#                  seed, data_dir, zone, target_col, exogenous_cols) -> dict
+#   单分区赛道（Load/Price）zone 传 None（evaluator 签名统一，均接受 zone 关键字）。
 # ---------------------------------------------------------------
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
@@ -34,12 +34,10 @@ from data.solar_task_builder import SOLAR_FEATURE_SPEC
 from data.task_builder import FEATURE_SPEC, TARGET_COL
 from data.wind_loader import WIND_DATA_DIR, WIND_TARGET_COL, wind_available_history
 from data.wind_task_builder import WIND_FEATURE_SPEC, WIND_WEATHER_DERIVED_COLS
-from evaluation.spec_evaluator import (
-    evaluate_price_spec,
-    evaluate_solar_spec,
-    evaluate_spec,
-    evaluate_wind_spec,
-)
+from evaluation.spec_evaluator import evaluate_spec
+from evaluation.price_spec_evaluator import evaluate_price_spec
+from evaluation.solar_spec_evaluator import evaluate_solar_spec
+from evaluation.wind_spec_evaluator import evaluate_wind_spec
 
 
 @dataclass(frozen=True)
@@ -67,27 +65,11 @@ def _load_availability(task_id: int, zone: Optional[int] = None,
     return available_history(task_id, data_dir)
 
 
-def _load_spec_evaluator(task_id: int, zone: Optional[int] = None, spec: List[dict] = None,
-                         protocol=None, val_hours: int = 168, backend_factory=None,
-                         seed: int = 42, data_dir=None) -> Dict:
-    """Load 单分区 wrapper：忽略 zone，对齐统一签名。"""
-    return evaluate_spec(task_id, spec, protocol, val_hours=val_hours,
-                         backend_factory=backend_factory, seed=seed, data_dir=data_dir)
-
-
 def _price_availability(task_id: int, zone: Optional[int] = None, data_dir=None) -> "Availability":
     """Price 单分区 wrapper：忽略 zone，对齐统一签名。"""
     if data_dir is None:
         return price_available_history(task_id)
     return price_available_history(task_id, data_dir)
-
-
-def _price_spec_evaluator(task_id: int, zone: Optional[int] = None, spec: List[dict] = None,
-                          protocol=None, val_hours: int = 168, backend_factory=None,
-                          seed: int = 42, data_dir=None) -> Dict:
-    """Price 单分区 wrapper：忽略 zone，对齐统一签名。"""
-    return evaluate_price_spec(task_id, spec, protocol, val_hours=val_hours,
-                               backend_factory=backend_factory, seed=seed, data_dir=data_dir)
 
 
 ENERGY_REGISTRY = {
@@ -105,7 +87,7 @@ ENERGY_REGISTRY = {
             "负荷特性：日/周周期强、规律明显；工作日/周末差异大；晚峰低谷是主要误差来源。"
         ),
         availability_fn=_load_availability,
-        spec_evaluator=_load_spec_evaluator,
+        spec_evaluator=evaluate_spec,
     ),
     "wind": EnergySpec(
         key="wind",
@@ -161,7 +143,7 @@ ENERGY_REGISTRY = {
             "在决策时点可得，是电价的重要驱动。尖峰日误差远大于常规日，Agent 应关注尾部风险。"
         ),
         availability_fn=_price_availability,
-        spec_evaluator=_price_spec_evaluator,
+        spec_evaluator=evaluate_price_spec,
     ),
 }
 

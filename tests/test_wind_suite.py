@@ -175,6 +175,7 @@ def test_w7_current_feature():
     from evaluation.wind_replay import _wind_features_at
 
     ALLOW = {"TARGETVAR", "ws10", "ws100", "wd10", "wd100", "ws_ratio"}
+    EXOG = sorted(ALLOW - {"TARGETVAR"})
 
     # 命名
     check("W7 current 命名",
@@ -182,7 +183,7 @@ def test_w7_current_feature():
 
     # normalize：外生放行
     ns = normalize_spec({"type": "current", "source": "ws100"}, [],
-                        target_col="TARGETVAR", allowed_sources=ALLOW)
+                        target_col="TARGETVAR", feature_tier=2, exogenous_cols=EXOG)
     check("W7 current normalize 外生放行",
           ns["name"] == "ws100_current" and ns["lookback_end"] == 0
           and not ns["uses_current_target"])
@@ -191,7 +192,7 @@ def test_w7_current_feature():
     rejected = False
     try:
         normalize_spec({"type": "current", "source": "TARGETVAR"}, [],
-                       target_col="TARGETVAR", allowed_sources=ALLOW)
+                       target_col="TARGETVAR", feature_tier=2, exogenous_cols=EXOG)
     except ValueError:
         rejected = True
     check("W7 current 目标列拒绝", rejected)
