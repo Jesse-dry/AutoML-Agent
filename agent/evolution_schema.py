@@ -91,37 +91,71 @@ class EvolutionContext:
     memories_text: str = ""
     round_history_text: str = ""
     max_lag: int = MAX_LAG
+    # ★ 三档动作空间
+    feature_tier: int = 3
+    target_col: str = "LOAD"
+    exogenous_cols: tuple = ()
+    # ★ 领域知识增强提示（按数据集注入）
+    domain_knowledge: str = ""
 
 
-def _spec_help(max_lag: int) -> str:
-    """feature_spec 类型说明（喂 system prompt）。"""
-    return f"""
-## feature_spec 允许的类型（血缘格式，name 由系统推导，无需你给列名）
+def _spec_help(max_lag: int, feature_tier: int = 3,
+               target_col: str = "LOAD", exogenous_cols: tuple = ()) -> str:
+    """feature_spec 类型说明（喂 system prompt），按档位渲染可用操作与 source 范围。"""
+    sources = [target_col]
+    if feature_tier >= 2:
+        sources += list(exogenous_cols)
+    src_str = " / ".join(f'"{s}"' for s in sources)
+    lines = [
+        "## feature_spec 允许的类型（血缘格式，name 由系统推导，无需你给列名）",
+        "",
+        f"1. time   {{\"type\":\"time\",  \"attr\":\"hour|weekday|month|is_weekend\"}}",
+        f"2. lag    {{\"type\":\"lag\",   \"source\":\"{target_col}\", \"k\":1..{max_lag}}}",
+    ]
+    if feature_tier >= 2:
+        lines.append(
+            f"   - lag/rolling 的 source 可取 {src_str}（能源领域外生列，如气象变量）"
+        )
+    lines.append(
+        f"3. rolling{{\"type\":\"rolling\",\"source\":\"{target_col}\", "
+        f"\"window\":2..{max_lag}, \"stat\":\"mean|std|var|max|min|median|sum|skew|kurt\"}}"
+    )
+    if feature_tier >= 3:
+        lines += [
+            "4. cross  {\"type\":\"cross\", \"col1\":\"已有特征名\", \"col2\":\"已有特征名\", "
+            "\"operation\":\"add|subtract|multiply|divide\"}",
+            "   - cross 的 col1/col2 必须是**当前特征集里已存在**的特征（建议 lag / rolling / time），"
+            f"禁止直接用 {target_col}；若想用某特征做交叉，先在同一候选里 add 它。",
+        ]
+    else:
+        lines.append(
+            f"（当前档位 tier={feature_tier}：未开放 cross 组合特征）"
+        )
+    lines += [
+        "",
+        "动作类型：",
+        "  add_feature     {\"type\":\"add_feature\", \"feature_spec\":{...}}",
+        "  remove_feature  {\"type\":\"remove_feature\", \"feature\":\"现有特征名\"}",
+        "  replace_feature {\"type\":\"replace_feature\", \"feature\":\"现有特征名\", \"feature_spec\":{...}}",
+        "  keep            {\"type\":\"keep\"}",
+        "  rollback        {\"type\":\"rollback\"}   # 从 best-so-far 状态重新开始探索",
+        "  stop            {\"type\":\"stop\"}       # 提议本轮停止",
+    ]
+    return "\n".join(lines)
 
-1. time   {{"type":"time",  "attr":"hour|weekday|month|is_weekend"}}
-2. lag    {{"type":"lag",   "source":"LOAD", "k":1..{max_lag}}}          # 只允许滞后 LOAD
-3. rolling{{"type":"rolling","source":"LOAD", "window":2..{max_lag}, "stat":"mean|std|var|max|min|median|sum|skew|kurt"}}
-4. cross  {{"type":"cross", "col1":"已有特征名", "col2":"已有特征名", "operation":"add|subtract|multiply|divide"}}
-   - cross 的 col1/col2 必须是**当前特征集里已存在**的特征（建议 lag / rolling / time），
-     禁止直接用 LOAD；若想用某特征做交叉，先在同一候选里 add 它。
 
-动作类型：
-  add_feature     {{"type":"add_feature", "feature_spec":{{...}}}}
-  remove_feature  {{"type":"remove_feature", "feature":"现有特征名"}}
-  replace_feature {{"type":"replace_feature", "feature":"现有特征名", "feature_spec":{{...}}}}
-  keep            {{"type":"keep"}}
-  rollback        {{"type":"rollback"}}   # 从 best-so-far 状态重新开始探索
-  stop            {{"type":"stop"}}       # 提议本轮停止
-"""
-
-
-def _system_prompt(max_lag: int, n_candidates: int) -> str:
-    return f"""你是电力负荷预测的**特征工程决策 Agent**。你只做决策，不写代码；
+def _system_prompt(max_lag: int, n_candidates: int, feature_tier: int = 3,
+                   target_col: str = "LOAD", exogenous_cols: tuple = (),
+                   domain_knowledge: str = "") -> str:
+    return f"""你是能源预测的**特征工程决策 Agent**。你只做决策，不写代码；
 所有特征由确定性引擎执行。你的目标是提升**预测月 online_h1 滚动 RMSE**。
 
 ## 时间因果红线（最高优先级）
 - 特征只能使用 ≤ t-1 的信息：lag/rolling 必须严格过去，禁止任何未来信息。
-- cross 只能组合"过去向特征"，禁止直接用当前时刻的 LOAD。
+- cross 只能组合"过去向特征"，禁止直接用当前时刻的 {target_col}。
+
+{_spec_help(max_lag, feature_tier, target_col, tuple(exogenous_cols))}
+{domain_knowledge}
 
 ## 每轮动作
 每轮返回 **{n_candidates} 个候选假设**（可 1~{n_candidates} 个），每个候选包含：
@@ -146,7 +180,7 @@ def _system_prompt(max_lag: int, n_candidates: int) -> str:
     {{
       "candidate_id": 1,
       "hypothesis": "中文假设（≥10字）",
-      "actions": [ {{"type":"add_feature","feature_spec":{{"type":"lag","source":"LOAD","k":48}}}} ]
+      "actions": [ {{"type":"add_feature","feature_spec":{{"type":"lag","source":"{target_col}","k":48}}}} ]
     }}
   ]
 }}
@@ -155,15 +189,23 @@ def _system_prompt(max_lag: int, n_candidates: int) -> str:
 
 def build_llm_v2_messages(ctx: EvolutionContext) -> List[Dict]:
     """渲染 system + user 两条消息。"""
-    sys = _system_prompt(ctx.max_lag, ctx.n_candidates)
+    sys = _system_prompt(ctx.max_lag, ctx.n_candidates, ctx.feature_tier,
+                         ctx.target_col, tuple(ctx.exogenous_cols),
+                         ctx.domain_knowledge)
 
     feat_list = ", ".join(ctx.current_features) if ctx.current_features else "（无）"
+    tier_desc = {
+        1: "基本时序（目标列 lag/time）",
+        2: "能源专有（+ 外生列 lag/rolling）",
+        3: "组合类（+ cross 组合特征）",
+    }.get(ctx.feature_tier, f"tier={ctx.feature_tier}")
     user = f"""## 任务
 Task {ctx.task_id}（{ctx.dataset_name}），第 {ctx.round}/{ctx.max_iterations} 轮。
 目标：在预测月 online_h1 滚动评测下降低 RMSE。返回 {ctx.n_candidates} 个**假设不同**的候选。
 
 ## 场景
 - 季节: {ctx.season or "?"}  ACF(lag24)={ctx.acf_24:.3f}  ACF(lag168)={ctx.acf_168:.3f}  load_cv={ctx.load_cv:.3f}
+- 动作空间档位: tier={ctx.feature_tier}（{tier_desc}）
 - 当前特征（{len(ctx.current_features)} 个）: {feat_list}
 - baseline RMSE = {ctx.baseline_rmse:.4f}；当前 best RMSE = {ctx.best_rmse:.4f}（第 {ctx.best_round} 轮）
 {ctx.round_history_text}

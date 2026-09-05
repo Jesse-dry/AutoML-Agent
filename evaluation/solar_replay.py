@@ -26,7 +26,7 @@ from data.solar_task_builder import (
     build_solar_forecast_features,
     build_solar_task,
 )
-from data.task_builder import feature_spec_hash
+from data.task_builder import _CROSS_OPS, feature_spec_hash
 from evaluation.evaluator import TaskResult, evaluate_task
 from evaluation.forecast_protocol import ONLINE_H1, ForecastProtocol
 from evaluation.leakage_checker import check_feature_leakage
@@ -87,6 +87,11 @@ def _solar_features_at(
                 row[name] = np.nan
             else:
                 row[name] = getattr(vals, s["stat"])()
+        elif stype == "cross":
+            # Tier 3 组合特征：操作列在 spec 中先定义，逐点复用已算值（与 Load 版同构）
+            row[name] = _CROSS_OPS[s["operation"]](
+                row[s["col1"]], row[s["col2"]]
+            )
     return row
 
 

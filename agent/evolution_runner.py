@@ -63,6 +63,13 @@ class EvolutionRunner:
         max_lag: int = 168,
         init_spec: Optional[List[dict]] = None,
         init_spec_label: str = "",
+        # ★ 三档动作空间 + 数据集参数
+        feature_tier: int = 3,
+        target_col: str = "LOAD",
+        exogenous_cols: Optional[List[str]] = None,
+        zone: Optional[int] = None,
+        scenario_builder: Optional[Callable] = None,
+        domain_knowledge: str = "",
     ):
         self.task_id = task_id
         self.backend_factory = backend_factory or (lambda: LightGBMBackend())
@@ -80,6 +87,12 @@ class EvolutionRunner:
         self.data_dir = data_dir or GEFCOM_DATA_DIR
         self.dataset_name = dataset_name or f"GEFCom2014 Task {task_id}"
         self.max_lag = int(max_lag)
+        self.feature_tier = int(feature_tier)
+        self.target_col = target_col
+        self.exogenous_cols = list(exogenous_cols or [])
+        self.zone = zone
+        self._scenario_builder = scenario_builder
+        self.domain_knowledge = domain_knowledge
 
         # 状态（init_spec 提供跨 Task 迁移的 warm-start 起点；
         # Round 0 评测 init_spec → baseline_rmse = 继承策略在本 Task 的 RMSE）
@@ -104,10 +117,12 @@ class EvolutionRunner:
     # 场景
     # ---------------------------------------------------------
     def _build_scenario(self) -> Scenario:
+        if self._scenario_builder is not None:
+            return self._scenario_builder(self.task_id, self.data_dir, self.zone)
         av = available_history(self.task_id, self.data_dir)
-        load = av.history_df[TARGET_COL].dropna()
+        load = av.history_df[self.target_col].dropna()
         cv = float(load.std() / load.mean()) if load.mean() != 0 else 0.0
-        acf = compute_acf_summary(av.history_df, TARGET_COL, lags=[24, 168])
+        acf = compute_acf_summary(av.history_df, self.target_col, lags=[24, 168])
         season = season_from_month(av.forecast_ts[0].month)
         return Scenario(
             season=season,
@@ -129,6 +144,9 @@ class EvolutionRunner:
             backend_factory=self.backend_factory,
             seed=self.seed,
             data_dir=self.data_dir,
+            zone=self.zone,
+            target_col=self.target_col,
+            exogenous_cols=self.exogenous_cols,
         )
         self._eval_cache[key] = res
         return res
@@ -175,6 +193,10 @@ class EvolutionRunner:
             memories_text=memories_text,
             round_history_text=hist_text,
             max_lag=self.max_lag,
+            feature_tier=self.feature_tier,
+            target_col=self.target_col,
+            exogenous_cols=tuple(self.exogenous_cols),
+            domain_knowledge=self.domain_knowledge,
         )
 
     # ---------------------------------------------------------
@@ -230,12 +252,21 @@ class EvolutionRunner:
 
             try:
                 filtered_acts = [a for a in acts if a.get("type") != "rollback"]
-                cspec = apply_actions(base_spec, filtered_acts)
+                cspec = apply_actions(
+                    base_spec, filtered_acts,
+                    target_col=self.target_col, max_lag=self.max_lag,
+                    feature_tier=self.feature_tier,
+                    exogenous_cols=self.exogenous_cols,
+                )
             except ValueError as e:
                 candidates.append({**base, "state": "invalid", "error": str(e)})
                 continue
 
-            viols = validate_spec_list(cspec, max_lag=self.max_lag)
+            viols = validate_spec_list(
+                cspec, target_col=self.target_col, max_lag=self.max_lag,
+                feature_tier=self.feature_tier,
+                exogenous_cols=self.exogenous_cols,
+            )
             if viols:
                 candidates.append({
                     **base, "state": "invalid",
