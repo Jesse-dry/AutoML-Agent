@@ -110,6 +110,17 @@ WIND_FEATURE_SPEC: List[dict] = [
     _rolling("ws100_rolling_mean_24", "ws100", 24, "mean"),
 ]
 
+# 冷启动基线（砍基线）：仅 time + TARGETVAR lag_1/24，不含 rolling / lag_168 / 气象外生。
+# 作为 Wind 自进化 Agent 的极简起点，与 Load/Solar 口径一致（负对照可比）。
+WIND_COLD_START_FEATURE_SPEC: List[dict] = [
+    _time("hour", "hour"),
+    _time("weekday", "weekday"),
+    _time("month", "month"),
+    _time("is_weekend", "is_weekend"),
+    _lag("lag_1", TARGET_COL, 1),
+    _lag("lag_24", TARGET_COL, 24),
+]
+
 WIND_FEATURE_COLS: List[str] = [s["name"] for s in WIND_FEATURE_SPEC]
 
 

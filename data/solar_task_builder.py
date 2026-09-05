@@ -87,6 +87,18 @@ SOLAR_FEATURE_SPEC: List[dict] = [
     _lag("VAR167_lag_1", "VAR167", 1),
 ]
 
+# 冷启动基线（砍基线）：仅 time + POWER lag_1/24，不含 rolling / lag_168 / 气象外生。
+# 作为 Solar 自进化 Agent 的极简起点，让 LLM 用 Tier 2 重新发现气象外生特征、
+# 用 Tier 1 重新发现滚动统计，放大增益对比。全局 SOLAR_FEATURE_SPEC 不变。
+SOLAR_COLD_START_FEATURE_SPEC: List[dict] = [
+    _time("hour", "hour"),
+    _time("weekday", "weekday"),
+    _time("month", "month"),
+    _time("is_weekend", "is_weekend"),
+    _lag("lag_1", TARGET_COL, 1),
+    _lag("lag_24", TARGET_COL, 24),
+]
+
 SOLAR_FEATURE_COLS: List[str] = [s["name"] for s in SOLAR_FEATURE_SPEC]
 
 

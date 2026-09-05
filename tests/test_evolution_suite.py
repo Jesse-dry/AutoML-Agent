@@ -29,6 +29,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from agent.domain_knowledge import DOMAIN_KNOWLEDGE, build_domain_knowledge_section, get_domain_knowledge
 from agent.evolution_runner import EvolutionRunner
 from agent.feature_spec import apply_actions, name_from_spec, normalize_spec, snapshot, validate_spec_list
 from agent.scripted_llm import ScriptedLLM, sequence
@@ -77,8 +78,9 @@ def _add_action(feature_spec):
 # ---------------------------------------------------------------
 
 def _mock_eval(rules):
-    def _evaluate(task_id, zone, spec, protocol, val_hours=168, backend_factory=None,
-                  seed=42, data_dir=None):
+    def _evaluate(task_id, spec, protocol, val_hours=168, backend_factory=None,
+                  seed=42, data_dir=None, zone=None, target_col="LOAD",
+                  exogenous_cols=None):
         rmse = float(rules([s["name"] for s in spec]))
         y_true = 100.0 + 10.0 * np.sin(np.linspace(0, 6.28, 48))
         y_pred = y_true + rmse / 5.0
@@ -157,18 +159,12 @@ def test_e2_apply_actions():
         check("E2 remove 不存在拒绝", False)
     except ValueError:
         check("E2 remove 不存在拒绝", True)
-    # add 重名 → 跳过而非抛错（避免连坐整单候选）；warnings 出参记录提示
-    _warn = []
-    s5 = apply_actions(base, [_add_action({"type": "lag", "source": "LOAD", "k": 1})],
-                       warnings=_warn)
-    check("E2 add 重名跳过", _names(s5) == _names(base) and len(_warn) == 1)
-    # 混合动作：1 个重名 + 1 个新特征 → 新特征仍生效，重名被跳过
-    _warn2 = []
-    s6 = apply_actions(base, [
-        _add_action({"type": "lag", "source": "LOAD", "k": 1}),   # 重名（跳过）
-        _add_action({"type": "lag", "source": "LOAD", "k": 48}),  # 新（生效）
-    ], warnings=_warn2)
-    check("E2 重名连坐解除", _names(s6) == _names(base) + ["lag_48"] and len(_warn2) == 1)
+    # add 重名 → ValueError
+    try:
+        apply_actions(base, [_add_action({"type": "lag", "source": "LOAD", "k": 1})])
+        check("E2 add 重名拒绝", False)
+    except ValueError:
+        check("E2 add 重名拒绝", True)
 
 
 # ---------------- E3 ----------------
@@ -719,6 +715,139 @@ def test_e16_outer_loop_cli():
         check("E16 总表 3 行", n_rows == 3, f"n={n_rows}")
 
 
+# ---------------- E17（三档动作空间） ----------------
+def test_e17_feature_tiers():
+    exo = ["VAR169", "VAR164", "VAR167"]
+    base = snapshot(FEATURE_SPEC)
+
+    # Tier 1：外生列 lag / cross → 拒
+    try:
+        normalize_spec({"type": "lag", "source": "VAR169", "k": 24},
+                       snapshot(FEATURE_SPEC), feature_tier=1, exogenous_cols=exo)
+        check("E17 Tier1 外生 lag 拒", False)
+    except ValueError:
+        check("E17 Tier1 外生 lag 拒", True)
+    try:
+        normalize_spec({"type": "cross", "col1": "lag_24", "col2": "lag_1",
+                        "operation": "subtract"}, snapshot(FEATURE_SPEC),
+                       feature_tier=1, exogenous_cols=exo)
+        check("E17 Tier1 cross 拒", False)
+    except ValueError:
+        check("E17 Tier1 cross 拒", True)
+    ns = normalize_spec({"type": "lag", "k": 48}, snapshot(FEATURE_SPEC),
+                        feature_tier=1)
+    check("E17 Tier1 目标 lag 通过", ns["name"] == "lag_48")
+
+    # Tier 2：外生列 lag/rolling 通过 + source 前缀命名；cross 仍拒
+    ns2 = normalize_spec({"type": "lag", "source": "VAR169", "k": 24},
+                         snapshot(FEATURE_SPEC), feature_tier=2, exogenous_cols=exo)
+    check("E17 Tier2 外生 lag 命名", ns2["name"] == "VAR169_lag_24")
+    nsr = normalize_spec({"type": "rolling", "source": "VAR169", "window": 24,
+                          "stat": "mean"}, snapshot(FEATURE_SPEC),
+                         feature_tier=2, exogenous_cols=exo)
+    check("E17 Tier2 外生 rolling 命名", nsr["name"] == "VAR169_rolling_mean_24")
+    try:
+        normalize_spec({"type": "cross", "col1": "lag_24", "col2": "lag_1",
+                        "operation": "subtract"}, snapshot(FEATURE_SPEC),
+                       feature_tier=2, exogenous_cols=exo)
+        check("E17 Tier2 cross 拒", False)
+    except ValueError:
+        check("E17 Tier2 cross 拒", True)
+
+    # Tier 3：cross 通过
+    ns3 = normalize_spec({"type": "cross", "col1": "lag_24", "col2": "lag_1",
+                          "operation": "subtract"}, snapshot(FEATURE_SPEC),
+                         feature_tier=3)
+    check("E17 Tier3 cross 通过", ns3["name"] == "lag_24_minus_lag_1")
+
+    # apply_actions 透传 tier
+    s2 = apply_actions(snapshot(FEATURE_SPEC),
+                       [_add_action({"type": "lag", "source": "VAR169", "k": 24})],
+                       feature_tier=2, exogenous_cols=exo)
+    check("E17 apply_actions Tier2 外生 lag", "VAR169_lag_24" in _names(s2))
+    try:
+        apply_actions(snapshot(FEATURE_SPEC),
+                      [_add_action({"type": "lag", "source": "VAR169", "k": 24})],
+                      feature_tier=1, exogenous_cols=exo)
+        check("E17 apply_actions Tier1 外生 lag 拒", False)
+    except ValueError:
+        check("E17 apply_actions Tier1 外生 lag 拒", True)
+
+    # validate_spec_list 档位防线（跨过 normalize 的硬校验）
+    t2_cross = snapshot(FEATURE_SPEC) + [{
+        "name": "c", "type": "cross", "col1": "lag_24", "col2": "lag_1",
+        "operation": "subtract", "lookback_start": -24, "lookback_end": -1,
+        "uses_current_target": False}]
+    v = validate_spec_list(t2_cross, feature_tier=2)
+    check("E17 validate Tier2 cross 拒", any(x.kind == "tier_disallowed" for x in v))
+    t1_exo = snapshot(FEATURE_SPEC) + [{
+        "name": "VAR169_lag_24", "type": "lag", "source": "VAR169", "k": 24,
+        "lookback_start": -24, "lookback_end": -24, "uses_current_target": False}]
+    v = validate_spec_list(t1_exo, feature_tier=1, exogenous_cols=exo)
+    check("E17 validate Tier1 外生 lag 拒", any(x.kind == "tier_disallowed" for x in v))
+
+
+# ---------------- E18（Solar Agent CLI 冒烟） ----------------
+def test_e18_solar_agent_cli():
+    with tempfile.TemporaryDirectory() as tmp:
+        outdir = Path(tmp) / "out"
+        memfile = Path(tmp) / "mem.jsonl"
+        cmd = [
+            sys.executable,
+            str(PROJECT_ROOT / "experiments" / "run_self_evolving_agent.py"),
+            "--task", "1", "--max-iter", "1", "--dry-run",
+            "--model", "persistence", "--n-candidates", "2",
+            "--dataset", "solar", "--zone", "1",
+            "--feature-tier", "3", "--baseline", "cold_start",
+            "--outdir", str(outdir), "--memory-file", str(memfile),
+        ]
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=300, env=env)
+        check("E18 Solar Agent CLI 返回码 0", proc.returncode == 0,
+              f"rc={proc.returncode}\n{proc.stderr[-600:]}")
+        check("E18 Solar Agent 产物", outdir.exists()
+              and (outdir / "run_manifest.json").exists()
+              and (outdir / "best_features.txt").exists())
+        if (outdir / "run_manifest.json").exists():
+            man = json.loads((outdir / "run_manifest.json").read_text(encoding="utf-8"))
+            check("E18 Solar Agent manifest 字段",
+                  man.get("dataset") == "solar" and man.get("zone") == 1
+                  and man.get("feature_tier") == 3 and man.get("baseline") == "cold_start")
+
+
+# ---------------- E19（领域知识增强注入） ----------------
+def test_e19_domain_knowledge():
+    # 注册表覆盖各领域
+    for ds in ("load", "solar", "wind", "price", "ecl"):
+        check(f"E19 {ds} 领域先验已注册",
+              ds in DOMAIN_KNOWLEDGE and len(get_domain_knowledge(ds)) > 50,
+              f"len={len(get_domain_knowledge(ds))}")
+    # 未注册数据集返回空（不注入额外先验）
+    check("E19 未注册数据集返回空", build_domain_knowledge_section("nope") == "")
+    # Solar 先验必须强调外生列主导（本轮核心）
+    solar = get_domain_knowledge("solar")
+    check("E19 solar 先验提 VAR169 主导",
+          "VAR169" in solar and "太阳辐射" in solar and "外生" in solar)
+    # prompt 渲染：domain_knowledge 进入 system prompt
+    from agent.evolution_schema import EvolutionContext, build_llm_v2_messages
+    ctx = EvolutionContext(
+        task_id=15, round=1, max_iterations=3, n_candidates=2,
+        dataset_name="GEFCom2014 Solar Task 15 Zone 1",
+        season="spring", acf_24=0.9, acf_168=0.5, load_cv=0.3,
+        feature_tier=2, target_col="POWER",
+        exogenous_cols=("VAR169", "VAR164", "VAR167"),
+        domain_knowledge=build_domain_knowledge_section("solar"),
+    )
+    msgs = build_llm_v2_messages(ctx)
+    sys_content = msgs[0]["content"]
+    check("E19 system prompt 含 solar 领域先验",
+          "太阳辐射" in sys_content and "VAR169" in sys_content
+          and "领域先验" in sys_content)
+    check("E19 system prompt 含档位说明", f"tier=2" in sys_content or "feature_spec" in sys_content)
+
+
 def main():
     print("=" * 60)
     test_e1_spec_naming()
@@ -737,6 +866,9 @@ def main():
     test_e14_drift_detector()
     test_e15_migration_decision()
     test_e16_outer_loop_cli()
+    test_e17_feature_tiers()
+    test_e18_solar_agent_cli()
+    test_e19_domain_knowledge()
     print("=" * 60)
     if _FAILED:
         print(f"FAILED: {_FAILED}")

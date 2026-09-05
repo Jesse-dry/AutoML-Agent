@@ -59,6 +59,24 @@ FEATURE_SPEC: List[dict] = [
      "lookback_start": -168, "lookback_end": -1, "uses_current_target": False},
 ]
 
+# 冷启动基线（砍基线）：仅 time + lag_1/24，不含 rolling / lag_168。
+# 作为自进化 Agent 的极简起点，让 LLM 用三档动作空间重新发现滚动统计、
+# 周滞后等特征，放大增益对比。全局 FEATURE_SPEC 不变（replay 基线数字保持）。
+COLD_START_FEATURE_SPEC: List[dict] = [
+    {"name": "hour", "type": "time", "attr": "hour",
+     "lookback_start": 0, "lookback_end": 0, "uses_current_target": False},
+    {"name": "weekday", "type": "time", "attr": "weekday",
+     "lookback_start": 0, "lookback_end": 0, "uses_current_target": False},
+    {"name": "month", "type": "time", "attr": "month",
+     "lookback_start": 0, "lookback_end": 0, "uses_current_target": False},
+    {"name": "is_weekend", "type": "time", "attr": "is_weekend",
+     "lookback_start": 0, "lookback_end": 0, "uses_current_target": False},
+    {"name": "lag_1", "type": "lag", "source": "LOAD", "k": 1,
+     "lookback_start": -1, "lookback_end": -1, "uses_current_target": False},
+    {"name": "lag_24", "type": "lag", "source": "LOAD", "k": 24,
+     "lookback_start": -24, "lookback_end": -24, "uses_current_target": False},
+]
+
 FEATURE_COLS: List[str] = [s["name"] for s in FEATURE_SPEC]
 
 DEFAULT_VAL_HOURS = 168

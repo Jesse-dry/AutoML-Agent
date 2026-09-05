@@ -116,6 +116,8 @@ AutoML-Agent/
 │   ├── evaluator.py                     # 指标计算 + 多 Task 汇总（复用 utils/metrics）
 │   ├── error_profiler.py                # 误差画像（时段/负荷状态/变化状态分段 + bias + top-worst）
 │   ├── spec_evaluator.py                # 候选特征集评测器（decision metric = 预测月 online_h1）
+│   ├── solar_spec_evaluator.py          # ★Solar 候选特征集评测器（Task×Zone + 气象外生，Tier 2/3 支持）
+│   ├── wind_spec_evaluator.py           # ★Wind 候选特征集评测器（Task×Zone + 气象派生 ws10/ws100，Tier 2/3 支持）
 │   ├── drift_detector.py                # ★跨 Task 漂移检测（尾部窗口均值/方差/分位/ACF/残余误差 → score/level）
 │   ├── task_replay.py                   # Task 1–15 回放主循环 + 审计输出（predictions/run_manifest）
 │   ├── wind_replay.py                   # ★Wind 回放主循环（15 Task × 10 Zone 逐分区独立模型 + 气象外生特征）
@@ -151,6 +153,7 @@ AutoML-Agent/
 │   ├── scripted_llm.py                  # ★确定性 LLM（测试 / --dry-run）
 │   ├── feature_engine.py                # 确定性特征执行引擎（lag/rolling/time/cross）[legacy]
 │   ├── feature_agent.py                 # LLM Agent 协议 + 闭环迭代调度器（v1，仅 ADD）[legacy]
+│   ├── domain_knowledge.py              # ★领域知识注册表（load/solar/wind/price/ecl 先验 + 负对照 key）
 │   ├── tuning_agent.py                  # (TODO) 超参调优 Agent
 │   ├── report_agent.py                  # (TODO) 报告生成 Agent
 │   └── market_agent.py                  # (TODO) 电价 Market/Price Agent（尖峰双层 + 归因，P-Value）
@@ -400,24 +403,59 @@ python experiments/run_price_replay.py --tasks 1:3 --model lightgbm --leak-check
 ### 4. 运行自进化 Agent（P1-A）
 
 ```bash
-# 真实 LLM 调用（多候选 + 误差画像 + 经验记忆）
+# 真实 LLM 调用（多候选 + 误差画像 + 经验记忆；默认 Load 数据集，冷启动基线）
 python experiments/run_self_evolving_agent.py --task 15 --max-iter 5
+
+# 三档动作空间对比实验（同一 Task 分别跑 tier 1/2/3，观察"动作空间越开放增益越大"）
+python experiments/run_self_evolving_agent.py --task 15 --max-iter 5 --feature-tier 1
+python experiments/run_self_evolving_agent.py --task 15 --max-iter 5 --feature-tier 2
+python experiments/run_self_evolving_agent.py --task 15 --max-iter 5 --feature-tier 3
+
+# Solar 赛道（15 Task × 3 Zone，逐分区独立 Agent；气象外生 VAR169/164/167 属 Tier 2 外生列）
+python experiments/run_self_evolving_agent.py --dataset solar --zone 1 --task 15 --max-iter 5 --feature-tier 3
+
+# Wind 赛道（15 Task × 10 Zone；气象派生 ws10/ws100 属 Tier 2 外生列，数据路径需 --data-dir 指定）
+python experiments/run_self_evolving_agent.py --dataset wind --zone 1 --task 1 --max-iter 5 --feature-tier 2 \
+  --data-dir "GEFCom2014 Data/GEFCom2014-W_V2/Wind"
+
+# 完整特征集作为起点（默认 cold_start 极简起点；full 用 FEATURE_SPEC 复现历史行为）
+python experiments/run_self_evolving_agent.py --task 15 --max-iter 5 --baseline full
+
+# 领域先验 / 负对照（--domain-key 显式指定；正=solar/load/wind，负=solar_neg_humidity/load_neg_solar 等）
+python experiments/run_self_evolving_agent.py --dataset solar --zone 1 --task 15 --max-iter 5 --feature-tier 2 --domain-key solar
+python experiments/run_self_evolving_agent.py --dataset solar --zone 1 --task 15 --max-iter 5 --feature-tier 2 --domain-key ""
 
 # 测试模式（ScriptedLLM 确定性演示，不调用 LLM；persistence 后端最快）
 python experiments/run_self_evolving_agent.py --task 1 --max-iter 3 --dry-run --model persistence
 ```
 
-产出（`experiments/output/evolution_task{id}/`）：
+CLI 参数：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--dataset load\|solar\|wind` | `load` | 数据集（solar/wind 需配 `--zone`） |
+| `--zone 1..N` | `1` | Solar 1..3 / Wind 1..10 分区 |
+| `--feature-tier 1\|2\|3` | `3` | 三档动作空间（见下） |
+| `--baseline cold_start\|full` | `cold_start` | Agent 起点：`cold_start` = 极简基线（time + lag_1/24，砍基线策略），`full` = 完整特征集 |
+| `--domain-key <key>` | 按 `--dataset` | 领域先验 key（正/负对照，见 domain_knowledge.py） |
+| `--data-dir <path>` | 数据集默认 | 数据目录覆盖（wind 数据在 `GEFCom2014 Data/GEFCom2014-W_V2/Wind`） |
+
+产出（`experiments/output/evolution_{dataset}_task{id}/`）：
 - `summary.json` — baseline → best RMSE 对比 + 每轮 outcome（improved / rolled_back / stopped）
 - `iteration_history.csv` — 每轮 best_rmse / delta / outcome
 - `best_features.txt` — 最优特征集；`error_profile_best_*.txt` — 最优特征集的误差画像
-- `run_manifest.json` — task / 协议 / 候选数 / seed / git_commit 审计
+- `run_manifest.json` — task / dataset / zone / feature_tier / baseline / 协议 / seed / git_commit 审计
 - `memory/experiment_memory.jsonl` — 每轮实验经验（跨 Task 共享，下次运行自动检索复用）
 
 > **自进化机制**：每轮 LLM 提出 ≤`--n-candidates`（默认 3）个**假设不同**的候选，逐个在
 > 预测月 online_h1 滚动评测；若最优候选仍劣于当前 best，Selector **自动回滚**到 best 特征集继续。
 > 即"第 N 轮退化 → 回滚 → 第 N+1 轮从 best 改善"是显式机制而非偶然
 > （由 `tests/test_evolution_suite.py` E6 确定性复现）。
+>
+> **砍基线策略**（`--baseline cold_start`）：把 Agent 起点砍到极简（仅 time + lag_1/24），
+> 让 LLM 用三档动作空间**重新发现**滚动统计、周滞后、气象外生等特征——增益对比被显著放大，
+> 是"增益小"场景的应对手段。`COLD_START_FEATURE_SPEC` / `SOLAR_COLD_START_FEATURE_SPEC`
+> 只作为 Agent 起点，**不影响** `FEATURE_SPEC` / `SOLAR_FEATURE_SPEC`（replay 基线数字不变）。
 
 ### 5. 运行外循环（P1-B，跨 Task 漂移检测 + 策略迁移）
 
@@ -517,6 +555,39 @@ Selector：最优候选优于 best → 接受；否则 current:=best（自动回
 - 特征名由 `name_from_spec` **确定性推导**（LLM 不需要发明列名，杜绝列名冲突）。
 - `validate_spec_list` 复用泄漏检查器的血缘静态检查（lag ≥ 1、rolling 必须 shift(1)、
   cross 操作列必须是已定义的过去向特征）；非法候选整条作废，错误回灌给 LLM 重试。
+
+#### ★ 三档动作空间（`--feature-tier 1|2|3`）
+
+为平衡"受约束动作空间"的核心叙事与 LLM 的探索空间，动作空间分三档递进开放：
+
+| 档位 | 名称 | 允许特征 | 说明 |
+|---|---|---|---|
+| **1** | 基本时序 | `time` + 目标列 `lag` | 最保守，仅目标列自回归/日历特征 |
+| **2** | 能源专有 | + 外生列（如 Solar `VAR169/VAR164/VAR167`）的 `lag`/`rolling` | 能源领域专有特征，来源列受 `exogenous_cols` 白名单约束 |
+| **3**（默认） | 组合类 | + `cross`（组合特征） | 给 LLM 最多空间，但 cross 操作列仍须是已定义的过去向特征 |
+
+- 档位越高，LLM 探索空间越大；**三档共用同一时间因果红线**（lag ≥ 1、rolling shift(1)、
+  cross 禁直用目标列），任何档位都不开放"任意列直用 / 未来信息"。
+- 用途：**固定档位对比实验**——同一 Task 分别用 tier 1/2/3 跑，观察
+  "动作空间越开放，LLM 特征增益越大"，是量化"受约束动作空间 vs 探索空间"权衡的实验主线。
+- 实现：`agent/feature_spec.py` 的 `normalize_spec` / `apply_actions` / `validate_spec_list`
+  透传 `feature_tier` / `exogenous_cols` / `target_col`；外生列特征的确定性命名带 source 前缀
+  （如 `VAR169_lag_24`），杜绝跨 source 列名冲突。
+
+#### ★ 领域知识增强提示（`--domain-key`，`agent/domain_knowledge.py`）
+
+按数据集注入**特征工程先验**：`load / solar / wind / price / ecl` 五段注册表，CLI 按 `--dataset`
+自动选择，`--domain-key` 可显式覆盖（支持负对照 key：`solar_neg_humidity` 等）。
+
+- Solar 先验核心：**VAR169 太阳辐射是第一主导信号**，优先构造辐射 lag/rolling 与 `POWER×VAR169` 交互。
+- 实测：Solar tier2/3 增强后 VAR169 使用率 0/3 → 3/3，增益约翻倍（-4.5%~-4.9% → -8.0%~-8.3%）。
+
+> ⚠️ **负对照结论（36 次真实 LLM 运行，详见 [EXPERIMENTS_SUMMARY.md](EXPERIMENTS_SUMMARY.md)）**：
+> 先验的价值 = **它指向的列 × 该列在数据集中的信息占比**。
+> - Wind（有外生列）：正 > 无 > 负（错配）单调成立；
+> - Solar（外生主导）：无 ≈ 正 > 负（load 错配 -1.3% vs -8%，3/3 seed 系统性忽略 VAR169）；
+> - Load（无外生列）：负先验指向不存在的列 → **白名单拒绝 → 被中和**，仅剩探索噪声。
+> 白名单（受约束动作空间）是**伤害上限的最终安全网**——先验不会让结果更差，但列不存在时也无的放矢。
 
 ### 多候选与回滚（`agent/evolution_runner.py`）
 
