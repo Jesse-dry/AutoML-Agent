@@ -47,5 +47,14 @@ PROJECT_SUMMARY.md
 OPEN_QUESTIONS.md
 PEI_RESEARCH.md
 
+# 队友协作 / 请教文档（仅本地，不推送）
+AGENT_KNOWLEDGE_GUIDE.md
+AI_AGENT_FOUNDATIONS.md
+server-guide.md
+ECL_REVIEW_NOTES.md
+ECL_TEAMMATE_HANDOFF.md
+ECL_TEAMMATE_TASK.md
+experiments/README_ECL_MEMORY.md
+
 # 答辩材料 / 本地讲解文档（docs/ 整目录仅本地，不推送）
 docs/
