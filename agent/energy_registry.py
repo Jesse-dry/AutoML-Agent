@@ -16,10 +16,30 @@ from typing import Callable, Dict, List, Optional
 
 from data.availability import available_history
 from data.gefcom_loader import GEFCOM_DATA_DIR
+from data.price_loader import (
+    PRICE_DATA_DIR,
+    PRICE_EXOGENOUS_COLS,
+    PRICE_TARGET_COL,
+    price_available_history,
+)
+from data.price_task_builder import PRICE_FEATURE_SPEC
+from data.solar_loader import (
+    SOLAR_DATA_DIR,
+    SOLAR_TARGET_COL,
+    SOLAR_WEATHER_COLS,
+    SOLAR_ZONES,
+    solar_available_history,
+)
+from data.solar_task_builder import SOLAR_FEATURE_SPEC
 from data.task_builder import FEATURE_SPEC, TARGET_COL
 from data.wind_loader import WIND_DATA_DIR, WIND_TARGET_COL, wind_available_history
 from data.wind_task_builder import WIND_FEATURE_SPEC, WIND_WEATHER_DERIVED_COLS
-from evaluation.spec_evaluator import evaluate_spec, evaluate_wind_spec
+from evaluation.spec_evaluator import (
+    evaluate_price_spec,
+    evaluate_solar_spec,
+    evaluate_spec,
+    evaluate_wind_spec,
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +73,21 @@ def _load_spec_evaluator(task_id: int, zone: Optional[int] = None, spec: List[di
     """Load 单分区 wrapper：忽略 zone，对齐统一签名。"""
     return evaluate_spec(task_id, spec, protocol, val_hours=val_hours,
                          backend_factory=backend_factory, seed=seed, data_dir=data_dir)
+
+
+def _price_availability(task_id: int, zone: Optional[int] = None, data_dir=None) -> "Availability":
+    """Price 单分区 wrapper：忽略 zone，对齐统一签名。"""
+    if data_dir is None:
+        return price_available_history(task_id)
+    return price_available_history(task_id, data_dir)
+
+
+def _price_spec_evaluator(task_id: int, zone: Optional[int] = None, spec: List[dict] = None,
+                          protocol=None, val_hours: int = 168, backend_factory=None,
+                          seed: int = 42, data_dir=None) -> Dict:
+    """Price 单分区 wrapper：忽略 zone，对齐统一签名。"""
+    return evaluate_price_spec(task_id, spec, protocol, val_hours=val_hours,
+                               backend_factory=backend_factory, seed=seed, data_dir=data_dir)
 
 
 ENERGY_REGISTRY = {
@@ -90,6 +125,43 @@ ENERGY_REGISTRY = {
         ),
         availability_fn=wind_available_history,
         spec_evaluator=evaluate_wind_spec,
+    ),
+    "solar": EnergySpec(
+        key="solar",
+        target_col=SOLAR_TARGET_COL,
+        data_dir=str(SOLAR_DATA_DIR),
+        zones=SOLAR_ZONES,
+        dataset_label="GEFCom2014-S",
+        label="光伏出力预测",
+        base_spec=SOLAR_FEATURE_SPEC,
+        allowed_sources=frozenset({SOLAR_TARGET_COL, *SOLAR_WEATHER_COLS}),
+        domain=(
+            "你是**光伏出力预测**的特征工程决策 Agent。目标列 POWER 为归一化光伏出力 [0,1]。\n"
+            "光伏特性：夜间恒 0（约 44% 小时）、白天由太阳辐射驱动，日周期极强但夜间无信号；\n"
+            "天气是白天出力波动的关键。外生气象预报（VAR169=SSRD 太阳辐射、VAR164=TCC 云量、\n"
+            "VAR167=2T 温度）在决策时点可得，是白天最重要的特征来源；夜间段特征应退化为恒 0，\n"
+            "Agent 应避免为夜间堆叠无效特征。"
+        ),
+        availability_fn=solar_available_history,
+        spec_evaluator=evaluate_solar_spec,
+    ),
+    "price": EnergySpec(
+        key="price",
+        target_col=PRICE_TARGET_COL,
+        data_dir=str(PRICE_DATA_DIR),
+        zones=(),
+        dataset_label="GEFCom2014-P",
+        label="电价预测",
+        base_spec=PRICE_FEATURE_SPEC,
+        allowed_sources=frozenset({PRICE_TARGET_COL, *PRICE_EXOGENOUS_COLS}),
+        domain=(
+            "你是**电价预测**的特征工程决策 Agent。目标列 Zonal Price 为连续肥尾电价\n"
+            "（均值≈48.6、p99≈156、max≈364）。电价由市场均衡决定：尖峰/肥尾、均值回归、\n"
+            "需求驱动；预测窗口 = 1 天（24h）。外生「Forecasted Total/Zonal Load」负荷预报\n"
+            "在决策时点可得，是电价的重要驱动。尖峰日误差远大于常规日，Agent 应关注尾部风险。"
+        ),
+        availability_fn=_price_availability,
+        spec_evaluator=_price_spec_evaluator,
     ),
 }
 

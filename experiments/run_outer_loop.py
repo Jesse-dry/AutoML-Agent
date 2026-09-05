@@ -93,8 +93,12 @@ def run_outer_loop(args) -> List[Dict]:
     zone = args.zone if es.zones else None
 
     outdir = Path(args.outdir) if args.outdir else (
-        PROJECT_ROOT / "experiments" / "output"
-        / ("outer_loop_wind" if energy == "wind" else "outer_loop")
+        PROJECT_ROOT / "experiments" / "output" / {
+            "load": "outer_loop",
+            "wind": "outer_loop_wind",
+            "solar": "outer_loop_solar",
+            "price": "outer_loop_price",
+        }.get(energy, "outer_loop")
     )
     memory = MemoryManager(Path(args.memory_file)) if args.memory_file else MemoryManager()
 
@@ -255,7 +259,7 @@ def _write_outputs(outdir: Path, rows: List[Dict], args) -> None:
     manifest = {
         "tasks": [r["task_id"] for r in rows],
         "energy": args.energy,
-        "zone": args.zone if args.energy == "wind" else None,
+        "zone": rows[0]["zone"] if rows else None,
         "protocol": args.protocol,
         "model": args.model,
         "n_candidates": args.n_candidates,
@@ -274,9 +278,11 @@ def _write_outputs(outdir: Path, rows: List[Dict], args) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="P1-B 跨 Task 漂移检测 + 策略迁移（外循环）")
     parser.add_argument("--tasks", default="1:15", help="任务范围，如 1:15 / 1,3,5")
-    parser.add_argument("--energy", default="load", choices=["load", "wind"],
-                        help="能源赛道：load（负荷）| wind（风电，单分区跨月滚动）")
-    parser.add_argument("--zone", type=int, default=1, help="Wind 分区 1..10（energy=wind 时生效）")
+    parser.add_argument("--energy", default="load",
+                        choices=["load", "wind", "solar", "price"],
+                        help="能源赛道：load（负荷）| wind（风电）| solar（光伏）| price（电价）")
+    parser.add_argument("--zone", type=int, default=1,
+                        help="分区号（wind 1..10 / solar 1..3 时生效）")
     parser.add_argument("--model", default="lightgbm",
                         help="lightgbm | persistence | seasonal_naive_24 | seasonal_naive_168")
     parser.add_argument("--protocol", default="online_h1",
@@ -295,8 +301,9 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true", help="抑制逐 Task verbose")
     args = parser.parse_args()
     args.verbose = not args.quiet
-    if args.energy == "wind" and not (1 <= args.zone <= 10):
-        print("[ERROR] zone 必须在 1..10", file=sys.stderr)
+    es = get_energy(args.energy)
+    if es.zones and args.zone not in es.zones:
+        print(f"[ERROR] energy={args.energy} 的 zone 必须在 {es.zones}", file=sys.stderr)
         return 1
 
     rows = run_outer_loop(args)

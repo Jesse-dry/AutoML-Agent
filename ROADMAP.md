@@ -22,7 +22,7 @@ GEFCom2014 Load（电力负荷）── 主论文核心
   ├── GEFCom2014 Wind（风电）── 随机性泛化
   ├── GEFCom2014 Solar（光伏）── 离散状态专家
   ├── GEFCom2014 Price（电价）── 肥尾尖峰 · 概率预测极端场景
-  ├── ECL（370 用户负荷）──── 跨用户迁移
+  ├── ECL（321 用户负荷）──── 跨用户迁移
   ├── ETT（变压器长序列）──── 模型选择
   └── Pecan Street（家庭能源）── 应用展示
 ```
@@ -68,7 +68,7 @@ GEFCom2014 Load（电力负荷）── 主论文核心
 | 2 | GEFCom2014 Wind | 风电 | 15 Task × 10 分区（Zone），1h | 随机性泛化 | 滚动自进化 + 多专家 + 风险 | ★★★★★ |
 | 3 | GEFCom2014 Solar | 光伏 | 15 Task，1h，含天气预测变量 | 离散状态专家 | 多专家协同 | ★★★★★ |
 | 4 | GEFCom2014 Price | 电价 | 15 Task，1h，单分区（ZONEID=1） | **第四赛道：肥尾尖峰 · 概率极端场景** | 风险感知（尾部概率校准） | ★★★★★ |
-| 5 | ECL | 用户级负荷 | 370 用户，15min | 跨用户迁移 | 时序经验记忆 | ★★★★★ |
+| 5 | ECL | 用户级负荷 | 321 用户，原始 15min（项目按小时预处理） | 跨用户迁移 | 时序经验记忆 | ★★★★★ |
 | 6 | ETT | 变压器长序列 | 4 个变体，1h/15min | 模型选择 | 模型选择 Agent | ★★★★ |
 | 7 | Pecan Street | 家庭能源 | 数百家庭，1min | 应用展示 | 家庭场景专家 | ★★★★ |
 
@@ -147,14 +147,14 @@ Uncertainty Expert（复用 V4.0）
 #### 5. ECL（Electricity Consumption Load）★★★★★
 
 - 来源：UCI，`ElectricityLoadDiagrams20112014`
-- 特点：370 个用户，15 分钟采样，2011–2014
+- 特点：321 个用户，原始 15 分钟采样；项目使用 2012–2014 的小时级预处理矩阵
 
 **实验设计（跨用户迁移）**：
 
 ```
-训练：User 1–300
-测试：User 301–370
-比较：普通模型 vs 带 Memory 的 Agent
+用户划分：固定 `seed=42` 随机划分 260 train / 61 test
+时间协议：train `< 2014-06-01`，validation 为 2014 年 6 月，test 为 2014-07 至 2014-12
+比较：No-Memory baseline vs 带 Memory 的 Agent
 ```
 
 **创新包装**：基于时序经验记忆的**跨用户迁移预测**——验证 Agent 能否把用户 A 的经验迁移到用户 B。
@@ -300,7 +300,7 @@ Household Energy Agent
 | **Exp 1** | 单能源预测能力 | GEFCom Load | LightGBM / PatchTST / LLM-Agent | RMSE / MAE / MAPE | Agent 有效 |
 | **Exp 2** | 跨能源泛化 | Load + Wind + Solar + Price | 单模型 vs 多专家架构 | RMSE / 分能源对比 | 多专家架构有效 |
 | **Exp 3** | 滚动自进化 | GEFCom Task1–15 | 逐 Task 指标序列 | RMSE 收敛趋势 | Agent 随任务积累变强 |
-| **Exp 4** | 跨用户迁移 | ECL | 普通模型 vs 有 Memory Agent | RMSE（User 301–370） | Memory 机制有效 |
+| **Exp 4** | 跨用户迁移 | ECL | No-Memory baseline vs 有 Memory Agent | 61 个 test 用户的 Mean/Median RMSE、相对 persistence 比值 | Memory 机制是否有效 |
 | **Exp 5** | 风险感知概率预测 | GEFCom Load+Wind+Price | 点预测 vs 概率预测（分位数校准） | Pinball / CRPS / Coverage / Interval Width | 风险感知有效 |
 | **Exp 5b** | 尾部风险（尖峰） | GEFCom2014 Price | 点预测 vs 分位数（尖峰日） | 尖峰捕获率 / 尾部 Pinball | 概率预测在肥尾场景更可靠 |
 
@@ -323,8 +323,8 @@ Household Energy Agent
 
 1. **GEFCom2014 Wind**（同一竞赛体系，数据格式与 Load 最接近，改动最小）✅
 2. **GEFCom2014 Price**（第四赛道）✅ 已接入：数据层 + 24h 滚动回放基线 Mean RMSE 6.96
-3. **GEFCom2014 Solar**（光伏，队友并行接入中，本地 `GEFCom2014-S_V2.zip`）
-4. **ECL**（UCI 公开下载，无协议门槛，做跨用户迁移）
+3. **GEFCom2014 Solar**（光伏）✅ 已接入：数据层 + 15×3 无泄漏滚动回放基线 Mean RMSE 0.0636
+4. **ECL**（UCI 公开下载）✅ 已接入：跨用户迁移数据层、统一协议、LightGBM/PatchTST 基线
 5. **ETT**（长序列，github 公开）
 6. **Pecan Street**（需数据协议，最后）
 
@@ -357,6 +357,14 @@ Household Energy Agent
 - [x] **Drift Detection + Strategy Migration（Load 版，P1-B）** ⭐⭐⭐⭐⭐ `evaluation/drift_detector.py` + `agent/strategy_migration.py` + `experiments/run_outer_loop.py`
   - 均值/方差/分位/周期/残余误差漂移 → 继承/修改/重置 → warm-start 双闭环
   - 待扩：极端天气漂移、Wind/Price 能源切换场景
+- [x] **Solar 光伏赛道接入（P0）** ⭐⭐⭐⭐⭐ `data/solar_loader.py` + `data/solar_task_builder.py` + `evaluation/solar_replay.py` + `experiments/run_solar_replay.py` + `tests/test_solar_suite.py`
+  - 15 Task × 3 Zone 无泄漏滚动回放，LightGBM 基线 Mean RMSE = 0.0636（归一化 [0,1] 量纲）
+- [x] **ECL 跨用户迁移基线与统一协议（Exp 4 前置）** ⭐⭐⭐⭐⭐ `data/ecl_loader.py` + `data/ecl_task_builder.py` + `evaluation/ecl_protocol.py` + `evaluation/ecl_replay.py` + `models/PatchTST/ecl_patchtst_migration.py`
+  - 321 用户按 `seed=42` 划分为 260 train / 61 test；train/validation/test 时间边界统一；ECL 协议回归测试扩展至 E1–E10
+  - LightGBM 与 PatchTST 基线产出结构化指标；完整产物不入 Git，需在有原始数据的环境复核
+- [ ] **ECL 经验记忆对照实验（Exp 4 核心）** ⭐⭐⭐⭐⭐
+  - 实现 No-Memory 与 Memory Agent，保持用户切分、时间窗口、后端、随机种子和有效掩码一致
+  - 记录逐用户 RMSE、ratio vs persistence，以及可追溯的策略决策；不得把 test 标签写入训练记忆
 
 ### P1 —— 核心创新（V3.0 + V4.0 并行）
 
