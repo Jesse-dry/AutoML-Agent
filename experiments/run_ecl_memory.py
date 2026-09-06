@@ -43,16 +43,46 @@ from models.replay_backends import make_backend  # noqa: E402
 
 
 def candidate_specs() -> Dict[str, List[dict]]:
-    """Return a small, deterministic candidate set for the memory bootstrap."""
+    """Return the deterministic candidate set for the memory bootstrap.
+
+    Expanded pool (3 -> 10) across four dimensions, all protocol-safe
+    (past-only, lookback <= 168h, names match build_features):
+      * 滞后组合   base / lag48 / lag168 / lag48+lag168
+      * 滚动统计   no_std24 / mean48 / std168 / mean168
+      * 时间交互   hour×weekday（cross）
+      * 短程微调   lag12
+    """
     base = [dict(s) for s in ECL_FEATURE_SPEC]
-    # Keep candidates protocol-safe: all features are past-only and <=168h.
-    lag48 = base + [{
-        "name": "lag_48", "type": "lag", "source": "load", "k": 48,
-        "lookback_start": -48, "lookback_end": -48,
-        "uses_current_target": False,
-    }]
-    no_std = [s for s in base if s["name"] != "rolling_std_24"]
-    return {"base": base, "lag48": lag48, "no_std24": no_std}
+
+    def _lag(k):
+        return {"name": f"lag_{k}", "type": "lag", "source": "load", "k": k,
+                "lookback_start": -k, "lookback_end": -k, "uses_current_target": False}
+
+    def _rolling(window, stat):
+        return {"name": f"rolling_{stat}_{window}", "type": "rolling", "source": "load",
+                "window": window, "stat": stat, "min_periods": window,
+                "lookback_start": -window, "lookback_end": -1, "uses_current_target": False}
+
+    def _cross(c1, c2, op):
+        return {"name": f"{c1}_{op}_{c2}", "type": "cross", "col1": c1, "col2": c2,
+                "operation": op, "lookback_start": 0, "lookback_end": 0,
+                "uses_current_target": False}
+
+    return {
+        # --- 滞后组合（base 已含 lag_1/24/168，这里只补中短程） ---
+        "base": base,
+        "lag12": base + [_lag(12)],
+        "lag48": base + [_lag(48)],
+        "lag96": base + [_lag(96)],
+        "lag12_lag48": base + [_lag(12), _lag(48)],
+        # --- 滚动统计（base 已含 mean24/std24/mean168，这里补变体） ---
+        "no_std24": [s for s in base if s["name"] != "rolling_std_24"],
+        "mean48": base + [_rolling(48, "mean")],
+        "std48": base + [_rolling(48, "std")],
+        "mean72": base + [_rolling(72, "mean")],
+        # --- 时间交互（组合类） ---
+        "hour_x_weekday": base + [_cross("hour", "weekday", "multiply")],
+    }
 
 
 def _scenario_from_series(series: pd.Series) -> Scenario:

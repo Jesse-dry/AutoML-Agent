@@ -79,8 +79,22 @@ Agent 起点从完整特征集砍到极简（time + lag_1/24），让 LLM 重新
 
 ### 4.2 ECL 跨用户记忆对照（Exp4，No-Memory vs Memory）
 
-队友 v2.2 的 `run_ecl_memory.py` 已跑通（persistence 后端冒烟，No-Memory == Memory 符合预期——
-persistence 下无特征可选，记忆无增益）。正式 260 用户 LightGBM 运行留待有数据机器。
+**完整 260 用户 LightGBM 运行**（61 test 用户，2014-07~12，seed=42）：
+
+| 条件 | Mean RMSE | Median RMSE | 胜 persistence |
+|---|---|---|---|
+| No-Memory（base 特征集） | 233.5 | 146.7 | 42.6% |
+| Memory Agent（bootstrap 候选池） | 239.8 | 156.9 | 41.0% |
+
+**候选池扩充**：`candidate_specs` 从 3 个扩到 **10 个**（滞后 lag12/48/96/12+48、滚动 mean48/std48/mean72/no_std24、
+时间交互 hour×weekday）。小样本（n_train=30）下 bootstrap 验证分数拉开明显差距：
+`lag48 125.15 < base 127.45`（base 只排第 6），记忆 Agent 由 lag48 驱动并**略优于** No-Memory
+（mean 1576.5 vs 1579.4）。
+
+**诚实负面结论（全量）**：扩充池后 bootstrap 在 train 用户 val 上选出 `no_std24`（3427 < base 3433），
+但迁移到 61 个**完全未见用户**时 Memory Agent 依然略差——**bootstrap 验证分布与测试分布错位**，
+特征子集选择的收益被跨用户分布偏移抵消。**ECL 的正确载体是用户无关表示（PatchTST + RevIN，
+93.4% 胜 persistence），而非特征子集选择**。负面结果如实收录，不调指标不修协议。
 
 ### 4.3 模型选择 Agent（candidate.model）
 
