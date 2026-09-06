@@ -399,6 +399,10 @@ python experiments/run_price_replay.py --tasks 1:3 --model lightgbm --leak-check
 > **Price 基线**（LightGBM，online_h1）：Mean RMSE **6.96**（电价量纲），vs persistence 10.27（↓32%），
 > 15 Task 全部领先，验证外生负荷特征有效。尖峰日（Task 8/9/15）RMSE 18.8/29.1/12.0，
 > 是电价肥尾的典型难点 —— 正是 V4.0 风险感知概率预测（尾部区间 / 尖峰捕获）要解决的场景。
+>
+> **Price 自进化 Agent**（cold_start + `--domain-key price`，Task 15，2/3 seed 有效）：
+> RMSE 11.95 → 10.49 / 11.17（**-12.3% / -13.5%**）—— LLM 特征工程在肥尾电价上拿到 12%+ 增益，
+> 是 P-Value 决策价值主线（储能套利利润 / Regret）的预告实验。详见 [EXPERIMENTS_SUMMARY.md](EXPERIMENTS_SUMMARY.md) §4.1。
 
 ### 4. 运行自进化 Agent（P1-A）
 

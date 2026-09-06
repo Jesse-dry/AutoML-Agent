@@ -715,6 +715,40 @@ def test_e16_outer_loop_cli():
         check("E16 总表 3 行", n_rows == 3, f"n={n_rows}")
 
 
+# ---------------- E20（多能源外循环冒烟：solar/price） ----------------
+def test_e20_multi_energy_outer_loop():
+    """替换旧 test_multi_energy_outer_loop（依赖废弃 --energy 旧方案）。
+
+    覆盖：solar / price 外循环 dry-run 可跑通、跨 Task 漂移检测 + 策略迁移
+    （对应旧 M1-M5：energy 解析 / 场景构建 / warm-start / 审计产物）。
+    """
+    for energy, zone, marker in [("solar", "1", "SOLAR"), ("price", "1", "PRICE")]:
+        with tempfile.TemporaryDirectory() as tmp:
+            outdir = Path(tmp) / f"outer_{energy}"
+            memfile = Path(tmp) / f"mem_{energy}.jsonl"
+            cmd = [
+                sys.executable,
+                str(PROJECT_ROOT / "experiments" / "run_outer_loop.py"),
+                "--tasks", "1:2", "--energy", energy, "--zone", zone,
+                "--dry-run", "--model", "persistence", "--n-candidates", "2",
+                "--outdir", str(outdir), "--memory-file", str(memfile), "--quiet",
+            ]
+            env = dict(os.environ, PYTHONIOENCODING="utf-8")
+            proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True,
+                                  text=True, encoding="utf-8", errors="replace",
+                                  timeout=300, env=env)
+            check(f"E20 {marker} 外循环返回码 0", proc.returncode == 0,
+                  f"rc={proc.returncode}\n{proc.stderr[-500:]}")
+            check(f"E20 {marker} 审计产物",
+                  (outdir / "task_01" / "strategy.json").exists()
+                  and (outdir / "task_02" / "drift_report.json").exists()
+                  and (outdir / "outer_loop_summary.csv").exists())
+            from memory.memory_manager import MemoryManager
+            mm = MemoryManager(memfile)
+            check(f"E20 {marker} 策略落盘 2 条", len(mm.load_strategies()) == 2,
+                  f"len={len(mm.load_strategies())}")
+
+
 # ---------------- E17（三档动作空间） ----------------
 def test_e17_feature_tiers():
     exo = ["VAR169", "VAR164", "VAR167"]
@@ -869,6 +903,7 @@ def main():
     test_e17_feature_tiers()
     test_e18_solar_agent_cli()
     test_e19_domain_knowledge()
+    test_e20_multi_energy_outer_loop()
     print("=" * 60)
     if _FAILED:
         print(f"FAILED: {_FAILED}")

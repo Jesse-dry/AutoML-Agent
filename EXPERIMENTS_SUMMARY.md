@@ -65,6 +65,33 @@ Agent 起点从完整特征集砍到极简（time + lag_1/24），让 LLM 重新
 
 ## 4. 负对照实验（回答"会不会更差 / 只适合这些数据集吗"）
 
+> 本次实验矩阵与队友 `integration/v2.2` 合并后补齐了 Price / ECL / 模型选择三个补丁（见 §5.5）。
+
+### 4.1 Price 电价赛道（领域先验 + 砍基线，3 seeds）
+
+| 条件 | Task 15 best | 增益 |
+|---|---|---|
+| baseline（LightGBM，full 特征集） | 11.95（README 基线 mean 6.96） | — |
+| cold_start + price 先验（tier3） | 10.487 / 11.170 / 11.189 | **-12.3% / -13.5% / 0%（API 中断空转）** |
+
+> 电价是肥尾尖峰场景，LLM 特征工程在 2/3 seed 上拿到 12%+ 增益，是 P-Value 决策价值主线
+> （储能套利利润 / Regret）的预告实验。
+
+### 4.2 ECL 跨用户记忆对照（Exp4，No-Memory vs Memory）
+
+队友 v2.2 的 `run_ecl_memory.py` 已跑通（persistence 后端冒烟，No-Memory == Memory 符合预期——
+persistence 下无特征可选，记忆无增益）。正式 260 用户 LightGBM 运行留待有数据机器。
+
+### 4.3 模型选择 Agent（candidate.model）
+
+v2.2 已实现：LLM 每个候选可带 `model` 字段（lightgbm/lstm/persistence/seasonal_naive_*），
+评测缓存按 `(task, zone, spec, model, protocol)` 隔离，Selector 同步更新 best spec + best model。
+- 真实 LLM demo（Load T15）：LLM 稳定选 lightgbm（该数据集最优后端，符合预期）；
+- **特征价值跨模型迁移消融**（`run_ablation_deep_features.py`）：Agent 在 LightGBM 上进化的
+  best_spec 喂给 LSTM 验证特征工程价值不限于浅模型——正面回应"只在 LightGBM 上有效"的质疑。
+
+## 5. 三数据集负对照汇总（回答"会不会更差 / 只适合这些数据集吗"）
+
 三数据集 × 正/无/负（错配 = 把别的领域有效先验原样扔过来 / 反事实 = 湿度反向周期）：
 
 | 数据集 | 正先验 | 无先验 | 负先验（最差臂） | 排序 |
@@ -86,7 +113,7 @@ Agent 起点从完整特征集砍到极简（time + lag_1/24），让 LLM 重新
 
 ---
 
-## 5. 复现命令
+## 6. 复现命令
 
 ```bash
 # 三档对比（Load / Solar / Wind）
@@ -113,13 +140,13 @@ python experiments/run_self_evolving_agent.py --task 15 --max-iter 5 --dataset s
 
 ---
 
-## 6. 测试
+## 7. 测试
 
 `tests/test_evolution_suite.py` 新增 E17（三档动作空间校验）、E18（Solar Agent CLI 冒烟）、E19（领域知识注册表 + prompt 注入）。全部套件通过。
 
 ---
 
-## 7. 关键文件
+## 8. 关键文件
 
 - `agent/feature_spec.py` — 三档动作空间（tier / exogenous source / 外生命名）
 - `agent/domain_knowledge.py` — 领域知识注册表 + 负对照 key
