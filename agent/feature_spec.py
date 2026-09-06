@@ -41,6 +41,21 @@ ROLLING_STATS = {"mean", "std", "var", "max", "min", "median", "sum", "skew", "k
 CROSS_OPS = {"add", "subtract", "multiply", "divide"}
 _OP_WORDS = {"add": "plus", "subtract": "minus", "multiply": "multiply", "divide": "div"}
 
+# cross operation 容错别名（LLM 常用缩写 → 合法值），降低非法 operation 导致的 retry
+_OP_ALIASES = {
+    "add": "add", "plus": "add", "sum": "add",
+    "subtract": "subtract", "minus": "subtract", "sub": "subtract", "diff": "subtract",
+    "multiply": "multiply", "mul": "multiply", "times": "multiply", "product": "multiply",
+    "divide": "divide", "div": "divide", "ratio": "divide",
+}
+
+
+def _normalize_cross_op(op) -> str:
+    """把 LLM 常见的 operation 缩写/别名映射到合法值（非字符串原样返回，供后续报错）。"""
+    if not isinstance(op, str):
+        return op
+    return _OP_ALIASES.get(op.strip().lower(), op)
+
 ACTION_TYPES = {
     "add_feature", "remove_feature", "replace_feature",
     "keep", "rollback", "stop",
@@ -83,6 +98,8 @@ def name_from_spec(spec_entry: dict, target_col: str = TARGET_COL) -> str:
         source = spec_entry.get("source", target_col)
         base = f"rolling_{spec_entry['stat']}_{spec_entry['window']}"
         return base if source == target_col else f"{source}_{base}"
+    if stype == "current":
+        return f"{spec_entry['source']}_current"
     if stype == "cross":
         return f"{spec_entry['col1']}_{_OP_WORDS[spec_entry['operation']]}_{spec_entry['col2']}"
     raise ValueError(f"未知特征类型: {stype}")
@@ -123,8 +140,8 @@ def normalize_spec(
     exogenous_cols = list(exogenous_cols or [])
 
     stype = raw.get("type")
-    if stype not in ("time", "lag", "rolling", "cross"):
-        raise ValueError(f"feature_spec 的 type 必须是 time/lag/rolling/cross，got {stype!r}")
+    if stype not in ("time", "lag", "rolling", "cross", "current"):
+        raise ValueError(f"feature_spec 的 type 必须是 time/lag/rolling/cross/current，got {stype!r}")
 
     if stype == "time":
         attr = raw.get("attr")
@@ -132,6 +149,18 @@ def normalize_spec(
             raise ValueError(f"time 特征的 attr 必须是 {sorted(TIME_ATTRS)}，got {attr!r}")
         return {
             "name": attr, "type": "time", "attr": attr,
+            "lookback_start": 0, "lookback_end": 0, "uses_current_target": False,
+        }
+
+    if stype == "current":
+        source = raw.get("source")
+        if not source:
+            raise ValueError("current 特征必须提供 source 外生列")
+        if source == target_col:
+            raise ValueError(f"current 特征只能作用于外生列，禁止 source={target_col}（用当前目标=泄漏）")
+        _check_source(source, target_col, exogenous_cols, feature_tier, stype)
+        return {
+            "name": f"{source}_current", "type": "current", "source": source,
             "lookback_start": 0, "lookback_end": 0, "uses_current_target": False,
         }
 
@@ -171,7 +200,7 @@ def normalize_spec(
             f"cross 特征仅在 feature_tier=3（组合类）开放，当前 tier={feature_tier}"
         )
     col1, col2 = raw.get("col1"), raw.get("col2")
-    op = raw.get("operation")
+    op = _normalize_cross_op(raw.get("operation"))
     if op not in CROSS_OPS:
         raise ValueError(f"cross operation 必须是 {sorted(CROSS_OPS)}，got {op!r}")
     existing_names = [s.get("name") for s in existing_specs]
@@ -228,7 +257,7 @@ def validate_spec_list(
         seen[name] = i + 1
 
         stype = s["type"]
-        if stype in ("lag", "rolling"):
+        if stype in ("lag", "rolling", "current"):
             src = s.get("source", target_col)
             allowed = [target_col] + ([*exogenous_cols] if feature_tier >= 2 else [])
             if src not in allowed:

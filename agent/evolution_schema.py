@@ -16,6 +16,11 @@ from data.task_builder import MAX_LAG
 
 MAX_ACTIONS_PER_CANDIDATE = 5
 
+# 候选可指定的评测后端（模型选择 Agent）。None = 沿用当前模型。
+MODEL_CHOICES = {
+    "lightgbm", "lstm", "persistence", "seasonal_naive_24", "seasonal_naive_168",
+}
+
 
 def parse_llm_v2(raw: Any, n_candidates_max: int = 3) -> Dict:
     """
@@ -54,10 +59,16 @@ def parse_llm_v2(raw: Any, n_candidates_max: int = 3) -> Dict:
                     f"candidates[{i}].actions[{j}] 非法，type 必须是 "
                     f"{sorted(ACTION_TYPES)}"
                 )
+        model = c.get("model")
+        if model is not None and (not isinstance(model, str) or model not in MODEL_CHOICES):
+            raise ValueError(
+                f"candidates[{i}].model 必须是 {sorted(MODEL_CHOICES)} 之一或省略，got {model!r}"
+            )
         validated.append({
             "candidate_id": int(c["candidate_id"]),
             "hypothesis": str(c["hypothesis"]),
             "actions": acts,
+            "model": model,
         })
 
     return {
@@ -97,6 +108,8 @@ class EvolutionContext:
     exogenous_cols: tuple = ()
     # ★ 领域知识增强提示（按数据集注入）
     domain_knowledge: str = ""
+    # ★ 模型选择 Agent
+    current_model: str = "lightgbm"
 
 
 def _spec_help(max_lag: int, feature_tier: int = 3,
@@ -120,6 +133,11 @@ def _spec_help(max_lag: int, feature_tier: int = 3,
         f"3. rolling{{\"type\":\"rolling\",\"source\":\"{target_col}\", "
         f"\"window\":2..{max_lag}, \"stat\":\"mean|std|var|max|min|median|sum|skew|kurt\"}}"
     )
+    if feature_tier >= 2 and exogenous_cols:
+        lines.append(
+            f"4. current {{\"type\":\"current\", \"source\":\"外生列\"}}  # 外生**当前小时**预报值"
+            f"（lookback=0，决策时点可得；训练侧历史实际天气 vs 预测侧预报，需感知分布偏移）"
+        )
     if feature_tier >= 3:
         lines += [
             "4. cross  {\"type\":\"cross\", \"col1\":\"已有特征名\", \"col2\":\"已有特征名\", "
@@ -161,7 +179,9 @@ def _system_prompt(max_lag: int, n_candidates: int, feature_tier: int = 3,
 每轮返回 **{n_candidates} 个候选假设**（可 1~{n_candidates} 个），每个候选包含：
 - hypothesis：基于误差画像 + 特征重要性的诊断与假设（必须与其它候选**不同假设**，
   例如：A 加强日周期、B 加强周周期、C 针对峰值/特定时段误差）；
-- actions：一组有序动作（0~5 个），对该候选要评估的特征集做修改。
+- actions：一组有序动作（0~5 个），对该候选要评估的特征集做修改；
+- model（可选）：指定该候选的评测后端（lightgbm|lstm|persistence|seasonal_naive_24|seasonal_naive_168），
+  省略则沿用当前模型。
 
 ## 特征设计原则
 1. 误差驱动：先看误差画像的 worst_segment / bias，针对性设计（如晚峰低估 →
@@ -180,6 +200,7 @@ def _system_prompt(max_lag: int, n_candidates: int, feature_tier: int = 3,
     {{
       "candidate_id": 1,
       "hypothesis": "中文假设（≥10字）",
+      "model": "lightgbm",
       "actions": [ {{"type":"add_feature","feature_spec":{{"type":"lag","source":"{target_col}","k":48}}}} ]
     }}
   ]
@@ -206,6 +227,7 @@ Task {ctx.task_id}（{ctx.dataset_name}），第 {ctx.round}/{ctx.max_iterations
 ## 场景
 - 季节: {ctx.season or "?"}  ACF(lag24)={ctx.acf_24:.3f}  ACF(lag168)={ctx.acf_168:.3f}  load_cv={ctx.load_cv:.3f}
 - 动作空间档位: tier={ctx.feature_tier}（{tier_desc}）
+- 当前模型: {ctx.current_model}
 - 当前特征（{len(ctx.current_features)} 个）: {feat_list}
 - baseline RMSE = {ctx.baseline_rmse:.4f}；当前 best RMSE = {ctx.best_rmse:.4f}（第 {ctx.best_round} 轮）
 {ctx.round_history_text}

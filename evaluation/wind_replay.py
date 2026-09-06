@@ -77,6 +77,11 @@ def _wind_features_at(
             src = s["source"]
             series = observed if src == target_col else weather[src]
             row[name] = series.get(t - _HOUR * s["k"], np.nan)
+        elif stype == "current":
+            # 外生当前小时值（lookback=0）：取 t 时刻气象外生列（不 shift）。
+            src = s["source"]
+            series = observed if src == target_col else weather[src]
+            row[name] = series.get(t, np.nan)
         elif stype == "rolling":
             src = s["source"]
             series = observed if src == target_col else weather[src]
